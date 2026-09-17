@@ -309,6 +309,8 @@ python3 ${SKILL_DIR}/scripts/svg_quality_checker.py <project_path> \
 
 **✅ Internal checkpoint** — preview launched in time, early gate after P05 (skipped on a roster of six or fewer pages), uninterrupted remaining pages, consolidated repair, exact §IX coverage, one-frame prose, final checker 0 errors, `notes/total.md` only when enabled. Do not print. Then run the applicable conditional gates and proceed to Step 7.
 
+> **Consulting-quality profile active?** Follow [`consulting-quality.md`](./profiles/consulting-quality.md): its authoring preview loop runs after each page inside the Visual Construction Phase (it renders and looks, never calls the checker, so the cadence above is unchanged), its deck review runs here after the final gate, and its PPTX inspection follows Step 7.3. Never active by default.
+>
 > **Chart pages?** Run [`verify-charts`](stages/verify-charts.md) before Step 7 to calibrate coordinates; skip without chart pages.
 >
 > **Visual self-check (opt-in)?** Run [`visual-review`](stages/visual-review.md) before Step 7 only when the user explicitly asked for a per-page visual re-pass ("跑一下视觉自检 / 视觉回看", "visual review", "check pages visually"); never by default, on inferred model capability, or on deck size.

@@ -179,7 +179,10 @@ def render_pages(server_url: str, pages: list[str], preview_dir: Path) -> list[d
 """
 
     with sync_playwright() as p:
-        browser = p.chromium.launch()
+        # An installed browser (msedge, chrome) can stand in for the bundled
+        # chromium download: PPT_MASTER_BROWSER_CHANNEL names the channel.
+        channel = os.environ.get('PPT_MASTER_BROWSER_CHANNEL') or None
+        browser = p.chromium.launch(channel=channel)
         try:
             context = browser.new_context()
             for page_name in pages:
