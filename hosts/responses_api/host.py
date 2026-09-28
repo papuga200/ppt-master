@@ -101,7 +101,7 @@ def _inside(path: str) -> Path:
     return resolved
 
 
-READ_DENY = [x for x in os.environ.get("PPT_MASTER_READ_DENY", "skills/ppt-master/scripts/**/*.py").split(";") if x]
+READ_DENY = [x for x in os.environ.get("PPT_MASTER_READ_DENY", "skills/ppt-master/scripts/*.py").split(";") if x]
 
 
 def _read_denied(target: Path) -> bool:
