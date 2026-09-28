@@ -103,7 +103,7 @@ CONTRACT_DOCS = [
     "references/executor-base.md", "references/shared-standards-core.md", "references/semantic-svg.md",
     "references/native-shape-authoring.md", "references/preset-shape-vocabulary.md", "references/topology-assembly.md",
     "references/executor-table.md", "references/native-data-interface.md", "references/consulting-typesetting.md", "references/consulting-review.md",
-    "references/svg-image-embedding.md",
+    "references/diagram-clarity.md", "references/svg-image-embedding.md",
 ]
 
 PAGE_AUTHOR_BRIEF = """# Page author
@@ -128,8 +128,8 @@ The deck is edited by people afterwards, so its objects must behave like theirs.
 - A table is a native table: when your record has a `Native-ready: <key>=yes` line, that grid is drawn as `<g id="<key>" data-pptx-replace-with="table">` with its JSON `<metadata>` (schema `ppt-master.semantic-table.v2`, native-data-interface.md §2) AND the visible fallback in the same design; style it per cell (header band, row fills, first-column weight, sparse borders, padding) so the PowerPoint table looks like the fallback. After every edit inside that group run `run_script stamp_native_fallbacks.py <project>/svg_output/<stem>.svg --write`.
 - One `<text>` per paragraph: the lines of one paragraph are positioned `<tspan>` lines inside that one `<text>`, never sibling `<text>` elements. A heading and the paragraph under it are two `<text>` elements with the same left edge.
 - A label on a bar, chip, chevron or node is centred in its shape (`text-anchor="middle"` at the shape's centre, vertically centred), unless the design needs it left-aligned with padding.
-- On a timeline or Gantt every bar carries its own label - inside the bar when it fits, otherwise starting just after the bar's end on the same row - never in a key or a lane heading (consulting-typesetting.md §6). A label that straddles a bar's edge is what the lint flags; fully inside or fully beside is clean.
-- An arrow between two boxes is a straight `<line>` from the edge of one box to the edge of the other, or one that bends once at a right angle, ending ON the edges (it becomes a connector glued to both boxes in PowerPoint); avoid routes with several bends.
+- On a timeline or Gantt every bar carries its own label - inside the bar when it fits, otherwise starting just after the bar's end on the same row - never in a key or a lane heading (consulting-typesetting.md §6). A label that straddles a bar's edge is what the lint flags; fully inside or fully beside is clean. Lay out every Gantt or timeline with `run_script timeline_layout.py <spec.json> --svg <out.svg>` (bars and markers placed exactly from the scale, labels inside or beside bars without collisions, milestones and gates named at their markers, dependencies as arrows), then paste and style its fragment.
+- An arrow between two boxes is a straight `<line>` from the edge of one box to the edge of the other, or a `<path>` of horizontal and vertical segments (`M x y H .. V .. H ..`, at most two bends), ending ON the edges with `marker-end` (it becomes a connector glued to both boxes in PowerPoint). Draw every diagram to the Diagram contract in diagram-clarity.md: one arrowhead at the target, loops that end with a head on the node they return to, exits drawn as labelled arrows to end states, every label attached, numbered callouts keyed both ways. For a flow or architecture with more than four nodes or any loop, lay it out with `run_script diagram_layout.py <spec.json> --svg <out.svg>` (ELK: orthogonal routes, labels measured and placed off the lines), then style.
 - Nothing is painted between a shape and the text that belongs to it: accent bars, icons and rules go where they do not overlap the text.
 
 ## Chrome

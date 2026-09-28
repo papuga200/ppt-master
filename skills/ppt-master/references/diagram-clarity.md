@@ -27,3 +27,36 @@ When a node holds several inputs, actions or outputs, write short parallel bulle
 - [IBM Carbon chart types](https://carbondesignsystem.com/data-visualization/chart-types/): select a chart from the analytic purpose, such as comparison, trend, part-to-whole or connection. Transferable: a familiar visual grammar can reduce explanation when it matches the question.
 
 These are pattern references, not assets to copy into a deck. A real data chart must use real or explicitly labelled scenario values. For a technical diagram, exact architecture still comes from the source, never from a reference example.
+
+## Diagram contract (authors draw to it; the reviewer and the lint check it)
+
+A diagram is read without a presenter. Every mark states one relationship, and every relationship the record names is a mark. The geometry lint measures the items tagged `[lint]`; the reviewer rules on the rest.
+
+**Connectors**
+- Every connector has a direction: one arrowhead, at the target end only (`marker-end`, or a small filled triangle touching the end). A line with no head is allowed only for a declared association (dashed, or a tether from a label to its mark). [lint `CONNECTOR_NO_TARGET`]
+- Each end touches something: the edge of a node, a container, another connector, or an end-state shape. An arrow that stops in empty space, or points at floating text, has no target. [lint `CONNECTOR_NO_TARGET`]
+- Prefer orthogonal routes: straight, or one or two right-angle bends. No diagonal shortcuts across the figure, no crossings you can avoid, no line running through a node it does not attach to. [lint `LINE_THROUGH_NODE`]
+
+**Loops, exits and end states**
+- A loop shows where it starts and where it returns: it leaves the deciding node and ends with an arrowhead on the node it returns to. A labelled underline below a row of steps is not a loop. [lint `LOOP_WITHOUT_HEAD`]
+- Every exit of a decision (pass / fail, accept / repair / replan, budget spent) is its own labelled arrow to an explicit end state or to the step it re-enters. Never write the exits as a phrase beside the figure ("PASS → accepted, budget → unresolved").
+- A terminal outcome is a node (a pill or box), not free text at the end of an arrow.
+
+**Labels**
+- Every label is attached: inside its shape, on or beside its connector (within about 12 px, off the line, never across another line), or a declared caption directly under or beside the figure. A short phrase floating in the figure area is an orphan. [lint `ORPHAN_LABEL`]
+- No text crosses a line or a container's border: a label that belongs outside the boundary sits wholly outside it. [lint `LINE_THROUGH_TEXT`, `BOUNDARY_CROSSING`]
+- Connector labels sit beside a straight segment, off every other line; a label names the relationship ("sends page images"), not a code.
+- No internal codes (`EXECUTION_REPAIR`, `P09`, `W23`) on a reader's page unless the record defines them there.
+
+**Callouts and keys**
+- Numbered callouts are keyed both ways: every number in the notes column has the same number as a marker on the figure, and every marker on the figure has its note. [lint `UNKEYED_CALLOUT`]
+- A legend explains symbols only (what a dashed line, a colour, a triangle means); it never carries content that could be a direct label.
+
+**Boundaries, axes and scales**
+- A container or boundary includes exactly what the text says it includes. If the words say "on your machine", every component on the machine is inside the outline and nothing else is.
+- An axis appears only when its dimension is real: a time axis with dated or numbered ticks, a scale with units. An arrow with ticks under a process is decoration; remove it or give it a scale.
+- One visual level of detail per figure; group only where the grouping means something.
+
+**Laying it out**
+- Flows and architectures with more than four nodes, or with any loop, are laid out with `scripts/diagram_layout.py` (ELK layered, orthogonal routes, labels measured and placed off the lines), then styled. Timelines and Gantt charts are laid out with `scripts/timeline_layout.py` (consulting-typesetting.md §6). Both print JSON coordinates and an SVG fragment in this contract.
+- Arrows that are straight or bend at right angles between two boxes become native connectors glued to both boxes after export (`pptx_text_in_shapes.py`): draw them as one `<line>`, or one `<path>` of horizontal and vertical segments (`M x y H .. V .. H ..`) whose ends sit on the box edges.

@@ -329,7 +329,7 @@ REVIEW_INSTRUCTIONS = """You are an independent visual reviewer of one rendered 
 Work in this order:
 1. DEFECTS.
    a. Rule on every item the geometry lint FLAGGED, from its zoomed crop: `item N: DEFECT - why` when it hurts reading or looks like a mistake (a line through the body of the letters, text straddling a box edge, a label spilling out of its box), or `item N: ACCEPTABLE - why` when you have looked and it is plainly intended and legible (a guide line crossing a label's margin, a label that deliberately continues past its bar onto clear space). The author has left these in; you decide.
-   b. Then list what a ruler cannot know, scanning the image top to bottom: a stray or empty element; text too small or low in contrast to read; crowding that blocks the reading path; or visible wording that a new reader cannot understand. Open space is acceptable when it supports the page's focus; call it a defect only when content is crowded elsewhere or the page cannot answer its question. Do not manufacture an item: a clean page has none.
+   b. Then list what a ruler cannot know, scanning the image top to bottom: a stray or empty element; text too small or low in contrast to read; crowding that blocks the reading path; or visible wording that a new reader cannot understand. On a diagram, check it against the DIAGRAM CONTRACT below: a connector without one arrowhead at its target, a loop that does not end with a head on the node it returns to, decision exits written as a phrase instead of drawn as labelled arrows to end states, a label floating unattached, a number with no matching marker, a boundary that leaves out what its words include, a decorative axis - each is a DEFECT. Open space is acceptable when it supports the page's focus; call it a defect only when content is crowded elsewhere or the page cannot answer its question. Do not manufacture an item: a clean page has none.
 2. CONCEPT CHECK. Read the image as a person who has not seen the record. State what question the page seems to answer and what its visual actually shows. Then compare with the record's Audience question, Visual task, Relationships, Hierarchy and nonbinding Composition. Can a reader answer the intended question from the marks and labels, including the direction, grouping and evidence? Are diagram nodes scannable where they contain parallel items, or are they prose paragraphs the reader must decode? Does the chosen carrier fit the content better than a simple list, table, example or image would? A reference lends structure, not content. Name each material departure and say whether it is local or structural.
 3. VERDICT. PASS when step 1 has no DEFECT and step 2 has no structural departure; EXECUTION_REPAIR when step 1 has a DEFECT or the departures in step 2 are local; CONCEPT_REPLAN whenever step 2 found a structural departure, regardless of how small the local fixes look. Then the single highest-impact change.
 
@@ -463,6 +463,16 @@ def _slide_record(project: Path, stem: str) -> str:
     return match.group(1).strip() if match else ""
 
 
+def _diagram_contract() -> str:
+    """The Diagram contract section of diagram-clarity.md: what a reviewer holds every diagram to (authors get the whole file)."""
+    import re
+    path = SCRIPTS.parent / "references" / "diagram-clarity.md"
+    if not path.is_file():
+        return ""
+    match = re.search(r"^## Diagram contract.*?(?=^## |\Z)", path.read_text(encoding="utf-8"), re.S | re.M)
+    return match.group(0).strip() if match else ""
+
+
 def _page_references(project: Path, stem: str, journal: dict) -> list[Path]:
     import re
     number = re.match(r"(\d+)", stem)
@@ -514,6 +524,9 @@ def cmd_review(args: argparse.Namespace) -> int:
     content = [{"type": "input_text", "text": "SLIDE RECORD (design_spec.md §IX):\n\n" + record}]
     if language.is_file():
         content.append({"type": "input_text", "text": "REVIEW LANGUAGE (consulting-review.md):\n\n" + language.read_text(encoding="utf-8")})
+    contract = _diagram_contract()
+    if contract:
+        content.append({"type": "input_text", "text": "DIAGRAM CONTRACT (diagram-clarity.md):\n\n" + contract})
     references = _page_references(project, stem, journal)
     for ref in references:
         content.append({"type": "input_text", "text": "REFERENCE SLIDE the author was shown (structure only, never content):"})

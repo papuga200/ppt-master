@@ -29,6 +29,12 @@ BLOCKERS (the page is not ready for the reviewer)
   DEAD_BAND / UNDERFILLED / HUDDLED  (flagged, with a crop) an empty band across the body over 15% of its
                   height, content in under 55% of it, or the figure squeezed into a strip; never on a cover,
                   divider, statement or closing page (type_floor.page_context)
+  ORPHAN_LABEL    a short label in a diagram attached to nothing (not in a shape, not beside its connector or a shape)
+  LOOP_WITHOUT_HEAD  a return route with no arrowhead, or a captioned underline standing in for a loop
+  CONNECTOR_NO_TARGET  an arrowhead that points at empty space
+  UNKEYED_CALLOUT numbered notes with no matching markers on the figure (or markers with no note)
+  BOUNDARY_CROSSING  the outline of a box or container cuts through a text line
+                  (the five diagram rules follow the Diagram contract of references/diagram-clarity.md; all are FLAGGED)
 NOTES (judgement, never blocking)
   TEXT_PAST_SHAPE dark text starts on a shape and continues onto the page (legible; a Gantt habit)
   LINE_THROUGH_NODE a connector crosses a box it is not attached to
@@ -72,6 +78,13 @@ JS_EXTRACT = r"""
   const scaleOf = el => { const m = el.getScreenCTM ? el.getScreenCTM() : null; return m ? Math.sqrt(Math.abs(m.a * m.d - m.b * m.c)) / rootScale : 1; };
   const waiver = el => { for (let n = el; n && n.nodeType === 1 && n !== svg.parentElement; n = n.parentElement) { const w = n.getAttribute('data-lint-ok'); if (w !== null) return w || 'declared intentional'; } return null; };
   const R = r => [r.left, r.top, r.right, r.bottom];
+  const where = el => { let ph = null, layer = null, chrome = false, native = false;
+    for (let n = el; n && n !== svg; n = n.parentElement) {
+      if (ph === null && n.getAttribute('data-pptx-placeholder')) ph = n.getAttribute('data-pptx-placeholder');
+      if (layer === null && n.getAttribute('data-pptx-layer')) layer = n.getAttribute('data-pptx-layer');
+      if (n.getAttribute('data-pptx-role') === 'chrome' || n.id === 'chrome') chrome = true;
+      if (n.getAttribute('data-pptx-replace-with') || n.getAttribute('data-pptx-native')) native = true; }
+    return {ph, layer, chrome, native}; };
   const out = {texts: [], lines: [], shapes: []};
   const order = new Map(); [...svg.querySelectorAll('*')].forEach((el, i) => order.set(el, i));
   const vb = svg.viewBox && svg.viewBox.baseVal && svg.viewBox.baseVal.width ? svg.viewBox.baseVal : {width: svg.clientWidth, height: svg.clientHeight};
@@ -92,7 +105,7 @@ JS_EXTRACT = r"""
     parts = parts.filter(p => p.rect[2] - p.rect[0] > 0.5 && p.rect[3] - p.rect[1] > 0.5);
     if (!parts.length) return;
     out.texts.push({index, order: order.get(t), id: t.id || null, text: t.textContent.replace(/\s+/g, ' ').trim().slice(0, 90), parts, fill: cs.fill, size: parseFloat(cs.fontSize), opacity: o, groups: groups(t), waiver: waiver(t),
-                    scale, ctx: ctx(t), weight: cs.fontWeight, family: cs.fontFamily, anchor: cs.textAnchor, words: t.textContent.trim().split(/\s+/).filter(Boolean).length});
+                    scale, ctx: ctx(t), weight: cs.fontWeight, family: cs.fontFamily, anchor: cs.textAnchor, words: t.textContent.trim().split(/\s+/).filter(Boolean).length, ...where(t)});
   });
   const M = (el, p) => { const m = el.getScreenCTM(); return [m.a * p.x + m.c * p.y + m.e, m.b * p.x + m.d * p.y + m.f]; };
   const stroked = cs => cs.stroke && cs.stroke !== 'none' && parseFloat(cs.strokeWidth || '0') > 0 && parseFloat(cs.strokeOpacity || '1') > 0.05;
@@ -104,7 +117,8 @@ JS_EXTRACT = r"""
     if (!isStroked && !isFilled) return;
     const rect = R(el.getBoundingClientRect());
     const base = {index, order: order.get(el), id: el.id || null, tag, rect, stroke: isStroked ? cs.stroke : null, width: parseFloat(cs.strokeWidth || '0'), dashed: cs.strokeDasharray && cs.strokeDasharray !== 'none',
-                  fill: isFilled ? cs.fill : null, opacity: o, groups: groups(el), waiver: waiver(el), ctx: ctx(el)};
+                  fill: isFilled ? cs.fill : null, opacity: o, groups: groups(el), waiver: waiver(el), ctx: ctx(el), ...where(el),
+                  heads: [!!cs.markerStart && cs.markerStart !== 'none', !!cs.markerEnd && cs.markerEnd !== 'none'], npts: el.points ? el.points.numberOfItems : null};
     const open = tag === 'line' || tag === 'polyline' || (tag === 'path' && !isFilled);
     const thin = isFilled && tag === 'rect' && Math.min(rect[2] - rect[0], rect[3] - rect[1]) <= 2.5 && Math.max(rect[2] - rect[0], rect[3] - rect[1]) > 12;
     if (thin) {
@@ -400,7 +414,8 @@ def analyse(geometry: dict, png_bytes: bytes | None = None, content_area=None, i
                 inside = r[0] >= left - 2 and r[2] <= right + 2
                 beside = (0 <= r[0] - right <= 14) or (0 <= left - r[2] <= 14)
                 straddles = r[0] < right and r[2] > left
-                if level and (inside or beside or straddles):
+                above = -2 <= top - r[3] <= 8 and r[0] < right and r[2] > left  # a long name wrapped just above a short bar
+                if (level and (inside or beside or straddles)) or above:
                     named = True
                     break
             if not named:
@@ -413,6 +428,10 @@ def analyse(geometry: dict, png_bytes: bytes | None = None, content_area=None, i
         findings.extend(type_findings(texts, page, width, height))
         if not page.get("sparse") and not is_cover:
             findings.extend(fill_findings(geometry, texts, shapes, width, height, content_area))
+
+    # ORPHAN_LABEL, LOOP_WITHOUT_HEAD, CONNECTOR_NO_TARGET, UNKEYED_CALLOUT, BOUNDARY_CROSSING (diagram-clarity.md, Diagram contract)
+    for finding in diagram_findings(geometry, texts, shapes, width, height, structural, findings):
+        add(finding["kind"], "blocker", finding["rect"], finding["message"], finding.get("waiver"))
 
     # UNUSED canvas (from the pixels): the quadrant and right-edge notes; the empty foot is DEAD_BAND's when the page context is known
     if png_bytes and not is_cover and not (page is not None and page.get("sparse")):
@@ -737,6 +756,439 @@ def fill_findings(geometry: dict, texts: list[dict], shapes: list[dict], width: 
                                  "message": f"the figure is {fig_h:.0f} px tall, {100 * fig_h / body_h:.0f}% of the body height, while {100 * empty_share:.0f}% "
                                             "of the body rows hold nothing: give the figure the space (larger nodes, type at the floor or above, room for its labels)"})
     return findings
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Diagram semantics (failure family F04; the "Diagram contract" of references/diagram-clarity.md). Every rule here is
+# FLAGGED (judgement: the reviewer rules on it from a crop), never CERTAIN:
+#   ORPHAN_LABEL         a short label in the figure attached to nothing: not in a shape, not beside a connector or a shape
+#   LOOP_WITHOUT_HEAD    a return route (U-shaped, both ends on nodes) with no arrowhead, or a labelled underline drawn under
+#                        a row of steps in place of a loop
+#   CONNECTOR_NO_TARGET  an arrowhead whose tip touches no shape and no line
+#   UNKEYED_CALLOUT      numbered notes whose numbers have no marker on the figure, or figure markers missing from the notes
+#   BOUNDARY_CROSSING    a text line cut by the outline of a box or a container
+# Connectors are rebuilt from what was drawn: `<line>`/`<path>` pieces that meet end to end are one connector, and an
+# arrowhead is a marker or a small filled triangle at the end.
+# ---------------------------------------------------------------------------------------------------------------------
+
+FIGURE_PLACEHOLDERS = {"object", "obj", "dgm", "chart", "pic", "tbl"}
+CHROME_ID = re.compile(r"title|footer|folio|eyebrow|running|source|page-number|slide-number|chrome|logo", re.I)
+SOURCE_TEXT = re.compile(r"^\s*(source|sources|note|notes|\*|©|figure|fig\.)\b", re.I)
+KEY_LINE = re.compile(r"^\s*\(?(\d{1,2})[.)]?\s+[^\W\d_]")  # "1 You work ...", "2. The skill ..." - a number then a word
+ATTACH_GAP = 12.0   # a label this close to its connector or shape is attached to it
+TOUCH_GAP = 8.0     # a connector end this close to a shape or a line touches it
+JOIN_GAP = 2.5      # line pieces whose ends are this close are one connector
+
+
+def _dist_point_rect(p, r) -> float:
+    dx = max(r[0] - p[0], 0.0, p[0] - r[2])
+    dy = max(r[1] - p[1], 0.0, p[1] - r[3])
+    return (dx * dx + dy * dy) ** 0.5
+
+
+def _dist_point_segment(p, a, b) -> float:
+    vx, vy = b[0] - a[0], b[1] - a[1]
+    length = vx * vx + vy * vy
+    t = 0.0 if length < 1e-9 else max(0.0, min(1.0, ((p[0] - a[0]) * vx + (p[1] - a[1]) * vy) / length))
+    x, y = a[0] + t * vx - p[0], a[1] + t * vy - p[1]
+    return (x * x + y * y) ** 0.5
+
+
+def _dist_segment_rect(a, b, r) -> float:
+    """Exact distance between a segment and a rectangle (0 when they meet): both are convex, so it is attained at a vertex."""
+    if (r[0] <= a[0] <= r[2] and r[1] <= a[1] <= r[3]) or inside_length(a, b, r)[0] > 0:
+        return 0.0
+    corners = ((r[0], r[1]), (r[2], r[1]), (r[2], r[3]), (r[0], r[3]))
+    return min([_dist_point_rect(a, r), _dist_point_rect(b, r)] + [_dist_point_segment(c, a, b) for c in corners])
+
+
+def _dist_points_rect(points, r) -> float:
+    if len(points) == 1:
+        return _dist_point_rect(points[0], r)
+    return min(_dist_segment_rect(p, q, r) for p, q in zip(points, points[1:]))
+
+
+def _dist_rect_rect(a, b) -> float:
+    dx = max(b[0] - a[2], 0.0, a[0] - b[2])
+    dy = max(b[1] - a[3], 0.0, a[1] - b[3])
+    return (dx * dx + dy * dy) ** 0.5
+
+
+def _outline_gap(box, r) -> float:
+    """Distance from a text box to the outline of a shape that does not hold it (0 when the box touches or crosses the outline)."""
+    return min(_dist_segment_rect(p, q, box) for p, q in (((r[0], r[1]), (r[2], r[1])), ((r[2], r[1]), (r[2], r[3])),
+                                                            ((r[2], r[3]), (r[0], r[3])), ((r[0], r[3]), (r[0], r[1]))))
+
+
+def _simplify(points, tolerance: float = 1.5) -> list:
+    """Ramer-Douglas-Peucker: a sampled path back to its corners."""
+    points = [tuple(p) for p in points]
+    if len(points) < 3:
+        return points
+    keep = [False] * len(points)
+    keep[0] = keep[-1] = True
+    stack = [(0, len(points) - 1)]
+    while stack:
+        first, last = stack.pop()
+        best, index = 0.0, None
+        for i in range(first + 1, last):
+            d = _dist_point_segment(points[i], points[first], points[last])
+            if d > best:
+                best, index = d, i
+        if index is not None and best > tolerance:
+            keep[index] = True
+            stack.extend([(first, index), (index, last)])
+    return [p for p, k in zip(points, keep) if k]
+
+
+def _bends(points) -> int:
+    count = 0
+    for a, b, c in zip(points, points[1:], points[2:]):
+        u, v = (b[0] - a[0], b[1] - a[1]), (c[0] - b[0], c[1] - b[1])
+        nu, nv = (u[0] ** 2 + u[1] ** 2) ** 0.5, (v[0] ** 2 + v[1] ** 2) ** 0.5
+        if nu > 1 and nv > 1 and (u[0] * v[0] + u[1] * v[1]) / (nu * nv) < 0.94:  # turns by more than ~20 degrees
+            count += 1
+    return count
+
+
+def _direction(a, b):
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    n = (dx * dx + dy * dy) ** 0.5 or 1.0
+    return dx / n, dy / n
+
+
+def _is_decor(item) -> bool:
+    """Master and layout art, the chrome, and native tables or charts are not part of a hand-drawn figure."""
+    return item.get("layer") in ("master", "layout") or bool(item.get("chrome")) or bool(item.get("native"))
+
+
+def connectors(lines: list[dict], heads: list[dict]) -> list[dict]:
+    """Rebuild each drawn connector: pieces of `<line>`/`<path>` that meet end to end (and only two at that point) are one
+    connector. Returns [{pts, heads: [start, end], dashed, lines}]."""
+    pieces = []
+    for ln in lines:
+        if len(ln.get("pts") or []) < 2 or ln.get("opacity", 1) < 0.15:
+            continue
+        runs = polyline_runs(ln["pts"])
+        marks = ln.get("heads") or [False, False]
+        for k, run in enumerate(runs):
+            pieces.append({"line": ln, "pts": _simplify(run), "head": [bool(marks[0]) and k == 0, bool(marks[1]) and k == len(runs) - 1]})
+    ends = [(i, side, piece["pts"][0 if side == 0 else -1]) for i, piece in enumerate(pieces) for side in (0, 1)]
+    neighbours = {}
+    for i, side, point in ends:
+        neighbours[(i, side)] = [(j, s) for j, s, q in ends if j != i and abs(point[0] - q[0]) <= JOIN_GAP and abs(point[1] - q[1]) <= JOIN_GAP]
+    link = {key: found[0] for key, found in neighbours.items() if len(found) == 1 and len(neighbours[found[0]]) == 1}
+    seen: set = set()
+    chains = []
+    for start in range(len(pieces)):
+        if start in seen:
+            continue
+        current, free, visited = start, 0, {start}
+        while (current, free) in link:  # walk to one extreme end
+            nxt, nxt_side = link[(current, free)]
+            if nxt in visited:
+                break
+            visited.add(nxt)
+            current, free = nxt, 1 - nxt_side
+        order, used, piece, entry = [], set(), current, free
+        while True:
+            used.add(piece)
+            order.append((piece, entry == 1))
+            if (piece, 1 - entry) not in link:
+                break
+            nxt, nxt_side = link[(piece, 1 - entry)]
+            if nxt in used:
+                break
+            piece, entry = nxt, nxt_side
+        seen |= used
+        points, marks = [], [False, False]
+        for position, (index, reverse) in enumerate(order):
+            own = pieces[index]["pts"][::-1] if reverse else pieces[index]["pts"]
+            head = pieces[index]["head"][::-1] if reverse else pieces[index]["head"]
+            if position == 0:
+                marks[0] = head[0]
+            if position == len(order) - 1:
+                marks[1] = head[1]
+            points.extend(own if not points else own[1:])
+        points = _simplify(points)
+        for side, point, inner in ((0, points[0], points[1] if len(points) > 1 else points[0]), (1, points[-1], points[-2] if len(points) > 1 else points[-1])):
+            if not marks[side] and any(_tip_of(point, inner, h["rect"]) for h in heads):
+                marks[side] = True  # a small filled triangle whose point is the line's end is an arrowhead
+        chains.append({"pts": points, "heads": marks, "dashed": any(pieces[i]["line"].get("dashed") for i, _ in order),
+                       "lines": [pieces[i]["line"] for i, _ in order]})
+    return chains
+
+
+def _text_box(t: dict):
+    rects = [ink(line["rect"]) for line in t["lines"]]
+    return [min(r[0] for r in rects), min(r[1] for r in rects), max(r[2] for r in rects), max(r[3] for r in rects)]
+
+
+def diagram_findings(geometry: dict, texts: list[dict], shapes: list[dict], width: float, height: float, structural, prior: list[dict]) -> list[dict]:
+    out: list[dict] = []
+
+    def flag(kind, rect, message, waiver=None):
+        out.append({"kind": kind, "rect": [round(v, 1) for v in rect], "message": message, "waiver": waiver})
+
+    lines = [ln for ln in geometry.get("lines") or [] if ln.get("opacity", 1) >= 0.15]
+    heads = [s for s in shapes if s.get("fill") and s["tag"] in ("polygon", "path") and area(s["rect"]) <= 400
+             and max(s["rect"][2] - s["rect"][0], s["rect"][3] - s["rect"][1]) <= 22 and s.get("npts") in (None, 3)]
+    head_ids = {id(h) for h in heads}
+    nodes = [s for s in shapes if id(s) not in head_ids and not structural(s) and area(s["rect"]) >= 150 and not _is_decor(s)]
+    figure_chains = connectors([ln for ln in lines if not _is_decor(ln)], heads)
+    all_chains = connectors(lines, heads)
+    framed_all = [s for s in shapes if s.get("framed") and id(s) not in head_ids]
+    targets = [s for s in shapes if id(s) not in head_ids and not structural(s) and area(s["rect"]) >= 40]  # anything an arrow may end on
+
+    def touches(point, own=None) -> bool:
+        if any(_dist_point_rect(point, n["rect"]) <= TOUCH_GAP for n in targets):
+            return True
+        for s in framed_all:  # the outline of a container, however large
+            r = s["rect"]
+            inside = r[0] <= point[0] <= r[2] and r[1] <= point[1] <= r[3]
+            edge = min(point[0] - r[0], r[2] - point[0], point[1] - r[1], r[3] - point[1]) if inside else _dist_point_rect(point, r)
+            if edge <= TOUCH_GAP:
+                return True
+        mine = {id(ln) for ln in (own or {}).get("lines", [])}
+        return any(not mine & {id(ln) for ln in chain["lines"]} and any(_dist_point_segment(point, a, b) <= TOUCH_GAP for a, b in zip(chain["pts"], chain["pts"][1:]))
+                   for chain in all_chains)
+
+    # CONNECTOR_NO_TARGET and LOOP_WITHOUT_HEAD (return routes)
+    for chain in figure_chains:
+        pts = chain["pts"]
+        length = sum(((b[0] - a[0]) ** 2 + (b[1] - a[1]) ** 2) ** 0.5 for a, b in zip(pts, pts[1:]))
+        if length < 10:
+            continue
+        first = chain["lines"][0]
+        name = first.get("id") or f'{first["tag"]} #{first["index"]}'
+        waiver = next((ln.get("waiver") for ln in chain["lines"] if ln.get("waiver")), None)
+        bends = _bends(pts)
+        axis_like = bends == 0 and (length > 0.35 * width or length > 0.35 * height)  # a long straight arrow is an axis: the reviewer judges it
+        for side in (0, 1):
+            tip = pts[0] if side == 0 else pts[-1]
+            if chain["heads"][side] and not axis_like and not touches(tip, chain) and not _legend_key(chain, side, texts):
+                flag("CONNECTOR_NO_TARGET", [tip[0] - 14, tip[1] - 14, tip[0] + 14, tip[1] + 14],
+                     f"the arrowhead of connector {name} at x={tip[0]:.0f}, y={tip[1]:.0f} points at empty space: end it on the edge of the "
+                     "node, end state or line it leads to (an outcome is a node, not free text)", waiver)
+        if bends >= 2 and not any(chain["heads"]) and not chain["dashed"]:
+            out_a, out_b = _direction(pts[0], pts[1]), _direction(pts[-1], pts[-2])
+            stubs = min(_seg_len(pts[0], pts[1]), _seg_len(pts[-2], pts[-1]))
+            joined = any(c is not chain and any(_dist_point_segment(end, a, b) <= JOIN_GAP + 1 for end in (c["pts"][0], c["pts"][-1])
+                                                for a, b in zip(pts[1:-1], pts[2:-1])) for c in figure_chains)
+            if (out_a[0] * out_b[0] + out_a[1] * out_b[1] > 0.7 and stubs >= 16 and not joined
+                    and touches(pts[0], chain) and touches(pts[-1], chain)):
+                box = [min(p[0] for p in pts), min(p[1] for p in pts), max(p[0] for p in pts), max(p[1] for p in pts)]
+                flag("LOOP_WITHOUT_HEAD", box, f"connector {name} leaves a node and comes back to another with no arrowhead: a loop shows where it "
+                     "returns - put one arrowhead on the node it returns to (marker-end), and label the route", waiver)
+
+    # LOOP_WITHOUT_HEAD (a labelled underline under a row of steps, standing in for a loop)
+    steps = [n for n in nodes if area(n["rect"]) >= 1500 and any(contains(n["rect"], line["rect"], 3) for t in texts for line in t["lines"])]
+    for chain in figure_chains:
+        pts = chain["pts"]
+        if len(pts) != 2 or any(chain["heads"]) or chain["dashed"] or abs(pts[0][1] - pts[1][1]) > 1.5:
+            continue
+        y, left, right = pts[0][1], min(pts[0][0], pts[1][0]), max(pts[0][0], pts[1][0])
+        if right - left < 150 or right - left > 0.8 * width:
+            continue  # too short to stand for a route, or a full-width rule
+        spanned = [n for n in steps if 0 < y - n["rect"][3] <= 90
+                   and min(right, n["rect"][2]) - max(left, n["rect"][0]) >= 0.5 * (n["rect"][2] - n["rect"][0])]
+        side_by_side = sorted(spanned, key=lambda n: n["rect"][0])
+        in_a_row = sum(1 for a, b in zip(side_by_side, side_by_side[1:]) if b["rect"][0] >= a["rect"][2] - 2)
+        if in_a_row < 1 or any(_dist_point_rect(p, n["rect"]) <= TOUCH_GAP for p in pts for n in nodes):
+            continue  # the steps a loop would join stand side by side in a row; a rule under a column is a heading rule
+        twins = [c for c in all_chains if len(c["pts"]) == 2 and abs(c["pts"][0][1] - c["pts"][1][1]) <= 1.5 and abs(c["pts"][0][1] - y) > 2
+                 and abs(min(c["pts"][0][0], c["pts"][1][0]) - left) <= 6 and abs(max(c["pts"][0][0], c["pts"][1][0]) - right) <= 6]
+        stroke = luminance(chain["lines"][0].get("stroke"))
+        if twins or (stroke is not None and stroke > 0.75):
+            continue  # one of a set of equal rules (table rows, chart lanes), or a pale separator rule
+        labels = [t for t in texts for line in t["lines"]  # a caption set on the line, starting where the line starts
+                  if -2 <= y - ink(line["rect"])[3] <= 8 and abs(line["rect"][0] - left) <= 12]
+        if labels:
+            flag("LOOP_WITHOUT_HEAD", [left, y - 16, right, y + 4],
+                 f'a labelled line ("{labels[0]["text"][:40]}") runs under {len(spanned)} steps without touching them: a loop or a return is drawn '
+                 "from the node that decides it back to the node it re-enters, with an arrowhead there - not as an underline", first_waiver(chain))
+
+    boxes = {t["index"]: _text_box(t) for t in texts}
+
+    # ORPHAN_LABEL
+    if figure_chains and len(nodes) >= 2:
+        extents = [n["rect"] for n in nodes] + [[min(p[0] for p in c["pts"]), min(p[1] for p in c["pts"]), max(p[0] for p in c["pts"]), max(p[1] for p in c["pts"])]
+                                                for c in all_chains if not any(ln.get("layer") == "master" or ln.get("chrome") or ln.get("native") for ln in c["lines"])]
+        fig = [min(r[0] for r in extents) - 48, min(r[1] for r in extents) - 48, max(r[2] for r in extents) + 48, max(r[3] for r in extents) + 48]
+        containers = {id(n) for n in nodes if any(m is not n and area(m["rect"]) >= 400 and area(m["rect"]) < 0.9 * area(n["rect"]) and contains(n["rect"], m["rect"], 1.0)
+                                                   for m in nodes)}
+        anchors = [s for s in shapes if not structural(s) and area(s["rect"]) >= 40]
+        used_heads = [h for h in heads if any(_tip_of(end, inner, h["rect"]) for c in all_chains
+                                              for end, inner in ((c["pts"][0], c["pts"][min(1, len(c["pts"]) - 1)]), (c["pts"][-1], c["pts"][max(-2, -len(c["pts"]))])))]
+        markers = [s for s in shapes if area(s["rect"]) <= 500 and max(s["rect"][2] - s["rect"][0], s["rect"][3] - s["rect"][1]) <= 26
+                   and s.get("fill") and not any(s is h for h in used_heads)]
+        routes = [c for c in all_chains if not any(ln.get("layer") == "master" or ln.get("chrome") for ln in c["lines"])
+                  and (any(c["heads"]) or _bends(c["pts"]) or all(any(_edge_gap(end, n["rect"]) <= TOUCH_GAP for n in nodes)
+                                                                   for end in (c["pts"][0], c["pts"][-1])))]  # connectors, not rules
+        bands = [s for s in shapes if structural(s) and s.get("fill") and min(s["rect"][2] - s["rect"][0], s["rect"][3] - s["rect"][1]) <= 90]
+        for t in texts:
+            words = [w for w in re.split(r"\s+", t["text"]) if re.search(r"\w", w)]
+            ph = t.get("ph")
+            if (not words or len(words) > 8 or len(t["lines"]) > 2 or (t.get("size") or 0) > 22 or _is_decor(t) or LIST_MARK.match(t["text"])
+                    or (ph is not None and ph not in FIGURE_PLACEHOLDERS) or CHROME_ID.search(t.get("id") or "") or SOURCE_TEXT.match(t["text"])):
+                continue
+            box = boxes[t["index"]]
+            centre = ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
+            if not (fig[0] <= centre[0] <= fig[2] and fig[1] <= centre[1] <= fig[3]) or not 0.10 * height < centre[1] < 0.92 * height:
+                continue
+            if not any(_dist_points_rect(c["pts"], box) <= 60 for c in routes):
+                continue  # far from every connector: body text or a panel, not a label of the diagram
+            if any(contains(b["rect"], box, 2.5) for b in bands):
+                continue  # the label of a band or a lane
+            holders = sorted((n for n in nodes if contains(n["rect"], box, 2.5)), key=lambda n: area(n["rect"]))
+            if holders:
+                r = holders[0]["rect"]
+                if id(holders[0]) not in containers or min(box[0] - r[0], r[2] - box[2], box[1] - r[1], r[3] - box[3]) <= 18:
+                    continue  # a node's own label, or a container's caption along its edge
+            if any(_dist_points_rect(c["pts"], box) <= ATTACH_GAP for c in all_chains):
+                continue  # on or beside a connector
+            if any(_outline_gap(box, s["rect"]) <= ATTACH_GAP for s in anchors if not contains(s["rect"], box, 2.5)):
+                continue  # beside a shape: a caption, a legend entry, a data label
+            if any(_marks_for(box, s["rect"]) for s in markers):
+                continue  # named at its marker (a milestone, a gate, a numbered badge)
+            if any(_heads_box(box, s["rect"]) and not any(u["index"] != t["index"] and _between(boxes[u["index"]], box, s["rect"]) for u in texts)
+                   for s in anchors if area(s["rect"]) >= 600):
+                continue  # a heading aligned with the column or box it heads
+            size = t.get("size") or 12
+            if any(u["index"] != t["index"] and not _is_decor(u) and (
+                    (min(box[2], boxes[u["index"]][2]) - max(box[0], boxes[u["index"]][0]) > 0
+                     and min(abs(boxes[u["index"]][1] - box[3]), abs(box[1] - boxes[u["index"]][3])) <= 1.2 * max(size, u.get("size") or 12))
+                    or (abs(boxes[u["index"]][3] - box[3]) <= 3 and min(abs(boxes[u["index"]][0] - box[2]), abs(box[0] - boxes[u["index"]][2])) <= 1.5 * size))
+                   for u in texts):
+                continue  # one line of a block of text
+            flag("ORPHAN_LABEL", box, f'"{t["text"][:60]}" floats in the figure, attached to nothing: put it inside the shape it names, beside '
+                 "its connector (within 12 px, off the line), or make it a node or a labelled arrow to an end state - or remove it", t.get("waiver"))
+
+    # UNKEYED_CALLOUT
+    if len(nodes) >= 3:
+        node_box = [min(n["rect"][0] for n in nodes), min(n["rect"][1] for n in nodes), max(n["rect"][2] for n in nodes), max(n["rect"][3] for n in nodes)]
+        markers, keys = {}, {}
+        for t in texts:
+            if _is_decor(t) or (t.get("ph") is not None and t.get("ph") not in FIGURE_PLACEHOLDERS | {"body"}) or CHROME_ID.search(t.get("id") or ""):
+                continue
+            box = boxes[t["index"]]
+            if box[1] > 0.9 * height:
+                continue
+            inside = any(contains(n["rect"], box, 2.5) for n in nodes)
+            value = t["text"].strip()
+            if re.fullmatch(r"\d{1,2}", value):
+                if inside:
+                    markers.setdefault(int(value), box)
+                continue
+            centre = ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
+            if inside or (node_box[0] <= centre[0] <= node_box[2] and node_box[1] <= centre[1] <= node_box[3]):
+                continue
+            for line in t["lines"]:
+                match = KEY_LINE.match(line["text"])
+                if match:
+                    keys.setdefault(int(match.group(1)), line["rect"])
+        ordered = sorted(keys)
+        if len(ordered) >= 2 and ordered == list(range(1, len(ordered) + 1)):
+            missing = [k for k in ordered if k not in markers]
+            extra = [m for m in sorted(markers) if m not in keys] if len(markers) >= 2 else []
+            if missing or extra:
+                rects = [keys[k] for k in missing] or [markers[m] for m in extra]
+                box = [min(r[0] for r in rects), min(r[1] for r in rects), max(r[2] for r in rects), max(r[3] for r in rects)]
+                what = "; ".join(part for part in (f"notes {', '.join(map(str, missing))} have no numbered marker on the figure" if missing else "",
+                                                   f"figure markers {', '.join(map(str, extra))} have no note" if extra else "") if part)
+                flag("UNKEYED_CALLOUT", box, f"numbered callouts are not keyed: {what}. Put the same number as a marker (a numeral in a small circle) "
+                     "on the mark each note explains, or drop the numbering")
+
+    # BOUNDARY_CROSSING: the outline of a box or container cuts through a text line
+    reported = {tuple(f["rect"]) for f in prior if f["kind"] in ("TEXT_OFF_SHAPE", "TEXT_INVISIBLE", "LINE_THROUGH_TEXT")}
+    outlines = [s for s in shapes if s.get("framed") and s["tag"] == "rect" and not _is_decor(s)
+                and s["rect"][2] - s["rect"][0] >= 30 and s["rect"][3] - s["rect"][1] >= 20]
+    for t in texts:
+        if _is_decor(t):
+            continue
+        for line in t["lines"]:
+            if tuple(round(v, 1) for v in line["rect"]) in reported:
+                continue
+            k = ink(line["rect"])
+            for s in outlines:
+                r = s["rect"]
+                cut = None
+                for x in (r[0], r[2]):
+                    if k[0] + 1.5 < x < k[2] - 1.5 and min(r[3], k[3]) - max(r[1], k[1]) >= 0.6 * (k[3] - k[1]):
+                        cut = [x - 1, k[1], x + 1, k[3]]
+                for y in (r[1], r[3]):
+                    if k[1] + 1.0 < y < k[3] - 1.0 and min(r[2], k[2]) - max(r[0], k[0]) >= 4:
+                        cut = [max(r[0], k[0]), y - 1, min(r[2], k[2]), y + 1]
+                if cut is None or hidden_by(geometry["shapes"], cut, s["order"], t["order"]):
+                    continue
+                name = s.get("id") or f'{s["tag"]} #{s["index"]}'
+                flag("BOUNDARY_CROSSING", line["rect"], f'the outline of {name} cuts through "{line["text"][:60]}": a label sits wholly inside '
+                     "the boundary or wholly outside it", t.get("waiver") or s.get("waiver"))
+                break
+    return out
+
+
+LIST_MARK = re.compile(r"^\s*[■▪●•◆◇◦‣·–-]\s")
+
+
+def _tip_of(end, inner, r) -> bool:
+    """Is the small shape `r` an arrowhead at this end: the end sits on the shape's far side in the line's direction of travel?"""
+    if _dist_point_rect(end, r) > 3.0:
+        return False
+    dx, dy = end[0] - inner[0], end[1] - inner[1]
+    if abs(dx) >= abs(dy):
+        return abs(end[0] - (r[2] if dx > 0 else r[0])) <= 3.0
+    return abs(end[1] - (r[3] if dy > 0 else r[1])) <= 3.0
+
+
+def _marks_for(box, r) -> bool:
+    """A label set at its marker: the marker sits over the label's span (or at its start) within 40 px above or below."""
+    cx = (r[0] + r[2]) / 2
+    over = box[0] - 14 <= cx <= box[2] + 14
+    return over and (0 <= r[1] - box[3] <= 40 or 0 <= box[1] - r[3] <= 40)
+
+
+def _heads_box(box, r, reach: float = 72.0) -> bool:
+    """A heading or caption aligned with a box (same left edge or same centre) above or below it."""
+    aligned = abs(box[0] - r[0]) <= 6 or abs((box[0] + box[2]) / 2 - (r[0] + r[2]) / 2) <= 6
+    return aligned and (0 <= r[1] - box[3] <= reach or 0 <= box[1] - r[3] <= reach)
+
+
+def _between(other, box, r) -> bool:
+    """Does `other` sit in the gap between a heading `box` and the box `r` it would head?"""
+    top, bottom = (box[3], r[1]) if box[3] <= r[1] else (r[3], box[1])
+    return other[1] >= top - 1 and other[3] <= bottom + 1 and min(other[2], max(box[2], r[2])) - max(other[0], min(box[0], r[0])) > 0
+
+
+def _edge_gap(point, r) -> float:
+    """Distance from a point to the outline of a rectangle, from inside or outside."""
+    if r[0] <= point[0] <= r[2] and r[1] <= point[1] <= r[3]:
+        return min(point[0] - r[0], r[2] - point[0], point[1] - r[1], r[3] - point[1])
+    return _dist_point_rect(point, r)
+
+
+def _seg_len(a, b) -> float:
+    return ((b[0] - a[0]) ** 2 + (b[1] - a[1]) ** 2) ** 0.5
+
+
+def _legend_key(chain: dict, side: int, texts: list[dict]) -> bool:
+    """A short horizontal sample arrow with its explanation just after the tip is a legend key, not a connector."""
+    pts = chain["pts"]
+    if len(pts) != 2 or abs(pts[0][1] - pts[1][1]) > 1.5 or _seg_len(pts[0], pts[1]) > 80:
+        return False
+    tip, tail = (pts[0], pts[1]) if side == 0 else (pts[1], pts[0])
+    forward = 1 if tip[0] > tail[0] else -1
+    for t in texts:
+        for line in t["lines"]:
+            r = line["rect"]
+            gap = r[0] - tip[0] if forward > 0 else tip[0] - r[2]
+            if -2 <= gap <= 14 and r[1] - 4 <= tip[1] <= r[3] + 4:
+                return True
+    return False
+
+
+def first_waiver(chain: dict):
+    return next((ln.get("waiver") for ln in chain["lines"] if ln.get("waiver")), None)
 
 
 def unused_canvas(png_bytes: bytes, width: float, height: float, content_area) -> list[dict]:
