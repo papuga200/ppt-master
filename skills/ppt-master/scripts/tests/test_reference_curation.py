@@ -52,3 +52,10 @@ def test_related_form_still_found_when_no_exact(tmp_path):
     _run("curate", str(_spec(tmp_path)), "--library", str(lib))
     out = _run("match", "--library", str(lib), "--form", "architecture", "--need", "phases", "--limit", "3")
     assert "reference a-flow" in out and "related form" in out
+
+
+def test_show_unknown_id_warns_and_continues(tmp_path):
+    lib = tmp_path / "lib"
+    _run("curate", str(_spec(tmp_path)), "--library", str(lib))
+    out = _run("show", "a-flow", "lib.stale.p44", "--library", str(lib))
+    assert "reference a-flow" in out and "not in this library: lib.stale.p44" in out

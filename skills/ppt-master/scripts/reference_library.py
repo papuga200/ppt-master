@@ -343,14 +343,17 @@ def cmd_label(args: argparse.Namespace, library: Path, entries: list[dict]) -> i
 def cmd_show(args: argparse.Namespace, library: Path, entries: list[dict]) -> int:
     by_id = {e.get("id"): e for e in entries}
     delivered = []
+    missing = []
     for ident in args.ids:
         entry = by_id.get(ident)
-        if not entry:
-            raise SystemExit(f"unknown id: {ident}")
-        if not (library / entry.get("image", "")).is_file():
-            raise SystemExit(f"{ident}: image missing on disk ({entry.get('image')}); rebuild the deck")
+        if not entry or not (library / entry.get("image", "")).is_file():
+            missing.append(ident)
+            continue
         image = _print(entry, library, None, [], counterexample=_rejected(entry))
         delivered.append({"id": ident, "image": str(image), "counterexample": _rejected(entry)})
+    if missing:  # a stale or mistyped id must not stop a page: say so and let the author continue
+        print(f"not in this library: {', '.join(missing)} - author the page without it, or find a replacement with "
+              "`match --form <exhibit> --need \"<visual task>\"`")
     _record(args.project, args.page, delivered)
     return 0
 
