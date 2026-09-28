@@ -743,7 +743,10 @@ def rules_to_lines(tree, stats: dict) -> None:
 def glue_connectors(tree, stats: dict) -> None:
     """A straight line that runs from the edge of one box to the edge of another becomes a real connector glued to both: move a box and
     the arrow follows. Geometry and paint are kept, so nothing moves now. Only rectangles offer the four edge sites this relies on; a line
-    with a free end is glued at the end that touches; multi-bend paths stay drawings (PowerPoint's elbow connectors cannot reproduce them)."""
+    with a free end is glued at the end that touches. A freeform of one straight segment, or of two or three horizontal and vertical
+    segments (an L or a Z: what `M x y H .. V .. H ..` exports as), becomes a straight, bentConnector2 or bentConnector3 connector through
+    the same corners (elbow_connector). Routes of four or more segments, and U-shaped returns whose two ends sit level, stay drawings:
+    PowerPoint's elbow presets cannot hold them exactly."""
     items = walk(tree)
     boxes = []
     for item in items:
@@ -805,6 +808,145 @@ def glue_connectors(tree, stats: dict) -> None:
             connector.append(style)
         item.parent.replace(item.el, connector)
         stats["glued"] += 1
+
+    for item in walk(tree):
+        if item.tag != "sp" or item.scaled or item.is_text or "".join(item.el.itertext()).strip():
+            continue
+        points = freeform_route(item)
+        if points is None:
+            continue
+        found = elbow_connector(points)
+        if found is None:
+            continue
+        begin, finish = site(points[0]), site(points[-1])
+        if begin is None and finish is None or (begin and finish and begin[0] == finish[0]):
+            continue
+        prst, off, ext, rot, flip_h, flip_v, adj = found
+        sppr = item.el.find("p:spPr", NS)
+        xfrm = sppr.find("a:xfrm", NS)
+        old_off = xfrm.find("a:off", NS)
+        shift_x, shift_y = item.box[0] - int(old_off.get("x")), item.box[1] - int(old_off.get("y"))  # absolute minus the parent frame
+        for key in ("rot", "flipH", "flipV"):
+            xfrm.attrib.pop(key, None)
+        if rot:
+            xfrm.set("rot", str(rot))
+        if flip_h:
+            xfrm.set("flipH", "1")
+        if flip_v:
+            xfrm.set("flipV", "1")
+        old_off.set("x", str(int(round(off[0] - shift_x))))
+        old_off.set("y", str(int(round(off[1] - shift_y))))
+        xfrm.find("a:ext", NS).set("cx", str(max(1, int(round(ext[0])))))
+        xfrm.find("a:ext", NS).set("cy", str(max(1, int(round(ext[1])))))
+        preset = etree.Element(q("a:prstGeom"))
+        preset.set("prst", prst)
+        av = etree.SubElement(preset, q("a:avLst"))
+        if adj is not None:
+            gd = etree.SubElement(av, q("a:gd"))
+            gd.set("name", "adj1")
+            gd.set("fmla", f"val {adj}")
+        sppr.replace(sppr.find("a:custGeom", NS), preset)
+        connector = etree.Element(q("p:cxnSp"))
+        non_visual = etree.SubElement(connector, q("p:nvCxnSpPr"))
+        props = etree.fromstring(etree.tostring(item.el.find("p:nvSpPr/p:cNvPr", NS)))
+        if re.fullmatch(r"(Freeform|Shape)\s*\d*", props.get("name", "")):
+            props.set("name", "Connector " + props.get("id", ""))
+        non_visual.append(props)
+        links = etree.SubElement(non_visual, q("p:cNvCxnSpPr"))
+        for tag, hit in (("a:stCxn", begin), ("a:endCxn", finish)):
+            if hit:
+                node = etree.SubElement(links, q(tag))
+                node.set("id", hit[0])
+                node.set("idx", str(hit[1]))
+        etree.SubElement(non_visual, q("p:nvPr"))
+        connector.append(sppr)
+        style = item.el.find("p:style", NS)
+        if style is not None:
+            connector.append(style)
+        item.parent.replace(item.el, connector)
+        stats["glued"] += 1
+        stats["elbows"] = stats.get("elbows", 0) + 1
+
+
+def freeform_route(item: Item) -> list | None:
+    """The corners of an unfilled, stroked custom-geometry path of one open subpath (moveTo then lineTo only), in absolute EMU."""
+    sppr = item.el.find("p:spPr", NS)
+    geometry, xfrm = sppr.find("a:custGeom", NS), sppr.find("a:xfrm", NS)
+    if geometry is None or xfrm is None or item.turned or sppr.find("a:noFill", NS) is None:
+        return None
+    line = sppr.find("a:ln", NS)
+    if line is None or line.find("a:noFill", NS) is not None:
+        return None
+    if not any(end is not None and end.get("type") not in (None, "none") for end in (line.find("a:headEnd", NS), line.find("a:tailEnd", NS))):
+        return None  # only arrows are connectors: a rule, a gate line or a leader stays a line
+    paths = geometry.findall("a:pathLst/a:path", NS)
+    if len(paths) != 1:
+        return None
+    steps = list(paths[0])
+    if len(steps) < 2 or etree.QName(steps[0]).localname != "moveTo" or any(etree.QName(s).localname != "lnTo" for s in steps[1:]):
+        return None
+    ext = xfrm.find("a:ext", NS)
+    width, height = int(paths[0].get("w") or ext.get("cx")), int(paths[0].get("h") or ext.get("cy"))
+    sx = (item.box[2] - item.box[0]) / width if width else 1.0
+    sy = (item.box[3] - item.box[1]) / height if height else 1.0
+    points = []
+    for step in steps:
+        pt = step.find("a:pt", NS)
+        points.append((item.box[0] + int(pt.get("x")) * sx, item.box[1] + int(pt.get("y")) * sy))
+    return points if len(points) <= 4 else None
+
+
+def _preset_route(prst: str, w: float, h: float, adj) -> list:
+    """The corners of a connector preset in its own frame (presetShapeDefinitions.xml)."""
+    if prst == "straightConnector1":
+        return [(0.0, 0.0), (w, h)]
+    if prst == "bentConnector2":
+        return [(0.0, 0.0), (w, 0.0), (w, h)]
+    x1 = w * (adj if adj is not None else 50000) / 100000
+    return [(0.0, 0.0), (x1, 0.0), (x1, h), (w, h)]
+
+
+def elbow_connector(points: list, tolerance: float = 1.5 * PX):
+    """The connector preset, frame and adjust value that draw exactly these corners (start first), or None.
+    Returns (prst, (off x, off y), (ext cx, ext cy), rot, flipH, flipV, adj1 or None). Every orientation is one of a quarter turn
+    or none, times the two flips; the adjust value places the middle leg of a Z."""
+    corners = [points[0]]
+    for here, after in zip(points[1:], points[2:] + [None]):  # a point on a straight run is not a corner
+        if after is not None and ((abs(corners[-1][0] - here[0]) <= tolerance and abs(here[0] - after[0]) <= tolerance)
+                                  or (abs(corners[-1][1] - here[1]) <= tolerance and abs(here[1] - after[1]) <= tolerance)):
+            continue
+        corners.append(here)
+    points = corners
+    n = len(points)
+    if n == 2:
+        prst = "straightConnector1"
+    elif n in (3, 4):
+        if any(abs(a[0] - b[0]) > tolerance and abs(a[1] - b[1]) > tolerance for a, b in zip(points, points[1:])):
+            return None  # a diagonal segment: not an elbow
+        prst = "bentConnector2" if n == 3 else "bentConnector3"
+    else:
+        return None
+    (x0, y0), (x1, y1) = points[0], points[-1]
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    span_x, span_y = abs(x1 - x0), abs(y1 - y0)
+    for rot in (0, 5400000):
+        w, h = (span_x, span_y) if rot == 0 else (span_y, span_x)
+        if prst == "bentConnector3" and w < 2 * PX:
+            continue  # the ends are level along the first leg (a U-turn): no finite adjust value draws it
+        for flip_h in (False, True):
+            for flip_v in (False, True):
+                def to_local(p, rot=rot, w=w, h=h, flip_h=flip_h, flip_v=flip_v):
+                    dx, dy = p[0] - cx, p[1] - cy
+                    if rot:
+                        dx, dy = dy, -dx  # undo a quarter turn clockwise
+                    lx, ly = dx + w / 2, dy + h / 2
+                    return (w - lx if flip_h else lx, h - ly if flip_v else ly)
+                local = [to_local(p) for p in points]
+                adj = int(round(local[1][0] / w * 100000)) if prst == "bentConnector3" else None
+                expected = _preset_route(prst, w, h, adj)
+                if all(abs(a[0] - b[0]) <= tolerance and abs(a[1] - b[1]) <= tolerance for a, b in zip(local, expected)):
+                    return prst, (cx - w / 2, cy - h / 2), (w, h), rot, flip_h, flip_v, adj
+    return None
 
 
 def name_objects(tree, stats: dict) -> None:

@@ -50,6 +50,8 @@ Markers the exporter recognises: `■ ▪ ● • ◆ ◇ ◦ ‣ ·`. An ordere
 
 A bar without a name is a coloured rectangle: the reader has to count down a list to find out what it is, and the editor who moves a bar no longer knows which task moved. So each bar is labelled where it is - never in a legend, a key, or a "sub-tasks in bar order" line in the lane heading.
 
+Never place a Gantt by hand. Write the plan as JSON (horizon, lanes with bars, milestones, gates, dependencies, the region) and run `scripts/timeline_layout.py spec.json --svg out.svg`: it puts every bar and marker exactly on the week or month scale, chooses each label's place by the rules below (inside, beside, or above - never truncated), thins the tick labels until none collide, names milestones and gates at their markers without collisions, and draws dependencies as arrows. Paste its fragment, then style it; if you move a bar, run it again.
+
 - The label goes INSIDE the bar when it fits with 6 px of padding each side (light text on a dark bar, dark on a light one), left-aligned or centred.
 - When the bar is too short for its words, the label sits BESIDE it on the same row: starting 6 px after the bar's right end, or ending 6 px before its left end when the right is taken. Fully outside is clean; straddling the bar's edge is the defect (that is what the lint flags) - so never start a long label inside a short bar.
 - Shorten before you shrink: `PR mode on pilot services (wk 14-18)` becomes `PR mode, pilot`; the weeks are on the ruler. Bar labels may use the annotation size.
