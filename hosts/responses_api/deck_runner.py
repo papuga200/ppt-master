@@ -1512,7 +1512,11 @@ class Runner:
                         "names a topic without a conclusion is a problem when the page never resolves it. Do not use outside knowledge to fill "
                         "gaps. Report each finding as `Slide NN: problem | repair: specific missing information`. For a whole-deck gap use "
                         "`Deck: problem | repair: specific missing bridge`. If the visible words let a newcomer follow the argument, write "
-                        "`VERDICT: PASS`; otherwise end with `VERDICT: REVISE`. Do not infer design intent from unseen material.")
+                        "`VERDICT: PASS`; otherwise end with `VERDICT: REVISE`. Do not infer design intent from unseen material. "
+                        "A slot written `[To be provided: ...]` is deliberate: it marks a fact (a person, credential, reference, owner, "
+                        "measured result) that the author's firm or client must supply and that must never be invented. Never ask for it "
+                        "to be filled; judge whether the page still explains itself with the slot, and whether the slot names clearly what "
+                        "belongs there.")
         reviewer = self.reviewers["frontier"]
         payload = {"model": reviewer["model"], "instructions": instructions, "store": False,
                    "input": [{"role": "user", "content": [{"type": "input_text", "text": "\n\n".join(texts)}]}]}
