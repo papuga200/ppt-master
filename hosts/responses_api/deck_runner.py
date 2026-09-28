@@ -1868,6 +1868,10 @@ class Runner:
             self.solve()
         with self.stage("planner"):
             self.plan()
+        if self.args.plan_only:  # stop at the handoff to page authoring: the solution, plan and plan-gate records are the product
+            self.telemetry({"event": "run_end", "wall_s": round(time.time() - started, 1), "deck": None, "warnings": self.warnings, "plan_only": True})
+            self.say("plan only: stopping before template and page authoring")
+            return 0
         pages = parse_pages(spec_path.read_text(encoding="utf-8"))
         if self.args.pages:
             wanted = {int(p) for p in self.args.pages}
@@ -1999,6 +2003,7 @@ def main() -> int:
     parser.add_argument("--floating-text", action="store_true", help="keep the exporter's floating text boxes: skip the pass that moves text inside its shapes")
     parser.add_argument("--strict-export", action="store_true", help="refuse to export while the final checker reports blocking issues")
     parser.add_argument("--skip-export", action="store_true")
+    parser.add_argument("--plan-only", action="store_true", help="run the solution and planning stages (with the plan gate) and stop before the template and pages")
     parser.add_argument("--no-parity-repair", action="store_true",
                         help="measure the exported deck in PowerPoint (pptx_parity.py) but do not send its certain findings back to the pages' authors")
     args = parser.parse_args()
