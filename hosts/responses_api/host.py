@@ -18,13 +18,24 @@ skill's documents, not here. It is not tied to any vendor's coding agent.
   PPT_MASTER_ENV_FILE; it is never printed or logged.
 
 Environment: PPT_MASTER_MODEL, PPT_MASTER_EFFORT, PPT_MASTER_REFERENCE_LIBRARY,
-PPT_MASTER_BROWSER_CHANNEL, PPT_MASTER_SESSIONS_DIR, PPT_MASTER_ENV_FILE.
+PPT_MASTER_BROWSER_CHANNEL, PPT_MASTER_SESSIONS_DIR, PPT_MASTER_ENV_FILE; PPT_MASTER_API_BASE and
+PPT_MASTER_API_KEY_VAR point the author at another Responses-API endpoint (OpenRouter:
+`https://openrouter.ai/api/v1` with `OPENROUTER_API_KEY`), which is stateless - the host then resends the
+saved `history.json` each turn (PPT_MASTER_STATELESS). The skill's own model calls stay on OPENAI_API_KEY. PPT_MASTER_READ_DENY (`;`-separated globs, default
+`skills/ppt-master/scripts/**/*.py`) keeps the author out of script source.
+
+Run it on the repository `.venv` (flask for the live-preview server that `page_review.py render`
+needs, PyMuPDF, Pillow, Playwright with a browser installed - `python -m playwright install chromium`
+- or PPT_MASTER_BROWSER_CHANNEL naming an installed one). The skill's scripts run on the same
+interpreter as this host. A profile run takes around a hundred turns; at the `--max-turns` ceiling the
+executed tool outputs are kept so `--resume-pending` continues the same turn.
 """
 
 from __future__ import annotations
 
 import argparse
 import base64
+import http.client
 import json
 import os
 import subprocess
@@ -36,30 +47,51 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 PY = Path(sys.executable)
+for _stream in (sys.stdout, sys.stderr):  # console codepages (GBK, cp1252) cannot print every tool result
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
 SCRIPTS = ROOT / "skills" / "ppt-master" / "scripts"
 ENV_FILE = Path(os.environ["PPT_MASTER_ENV_FILE"]) if os.environ.get("PPT_MASTER_ENV_FILE") else None
 OUT = Path(os.environ.get("PPT_MASTER_SESSIONS_DIR") or (ROOT / ".host-sessions")).resolve()
 MODEL = os.environ.get("PPT_MASTER_MODEL", "gpt-5.6-luna")
+API_BASE = os.environ.get("PPT_MASTER_API_BASE", "https://api.openai.com/v1").rstrip("/")
+KEY_VAR = os.environ.get("PPT_MASTER_API_KEY_VAR", "OPENAI_API_KEY")
+# A stateless endpoint (OpenRouter) keeps no server-side conversation: the host resends the whole history each turn.
+STATELESS = os.environ.get("PPT_MASTER_STATELESS", "1" if ("openrouter" in API_BASE or "anthropic.com" in API_BASE) else "0") == "1"
+# OpenRouter serves one model from many hosts at very different speeds (14 to 380 tokens/s measured for deepseek-v4.1-flash);
+# its default routing favours the cheapest. PPT_MASTER_PROVIDER is a JSON provider-preferences object, e.g.
+# {"order": ["Modal", "Together"], "allow_fallbacks": true}: an ordered pin keeps a conversation on one host, so its prompt cache holds.
+PROVIDER = json.loads(os.environ["PPT_MASTER_PROVIDER"]) if os.environ.get("PPT_MASTER_PROVIDER") else None
+EXTRA_HEADERS = {"HTTP-Referer": "https://github.com/papuga200/ppt-master", "X-Title": "ppt-master"} if "openrouter" in API_BASE else {}
 EFFORT = os.environ.get("PPT_MASTER_EFFORT", "high")
 LIBRARY = Path(os.environ["PPT_MASTER_REFERENCE_LIBRARY"]).resolve() if os.environ.get("PPT_MASTER_REFERENCE_LIBRARY") else None
 SESSION_STARTED = time.time()
 MAX_TOOL_OUTPUT = 60_000
 
 
-def _key() -> str:
-    value = os.environ.get("OPENAI_API_KEY")
+def _key(name: str | None = None) -> str:
+    name = name or KEY_VAR
+    value = os.environ.get(name)
     if value:
         return value
     if ENV_FILE and ENV_FILE.is_file():
         for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
-            if line.startswith("OPENAI_API_KEY="):
+            if line.startswith(name + "="):
                 return line.split("=", 1)[1].strip().strip('"').strip("'")
-    raise SystemExit("OPENAI_API_KEY not available")
+    raise SystemExit(f"{name} not available")
 
 
 def _env_for_scripts() -> dict[str, str]:
     env = dict(os.environ)
-    env["OPENAI_API_KEY"] = _key()
+    try:  # the skill's own model calls (the reviewer, image generation) stay on OpenAI whatever drives the author
+        env["OPENAI_API_KEY"] = _key("OPENAI_API_KEY")
+    except SystemExit:
+        pass
+    if os.environ.get("PPT_MASTER_REVIEW_KEY_VAR"):  # a reviewer from another family than the author (deck_runner sets it per tier)
+        try:
+            env[os.environ["PPT_MASTER_REVIEW_KEY_VAR"]] = _key(os.environ["PPT_MASTER_REVIEW_KEY_VAR"])
+        except SystemExit:
+            pass
     env.setdefault("IMAGE_BACKEND", "openai")
     env.setdefault("PYTHONIOENCODING", "utf-8")
     return env
@@ -72,8 +104,20 @@ def _inside(path: str) -> Path:
     return resolved
 
 
+READ_DENY = [x for x in os.environ.get("PPT_MASTER_READ_DENY", "skills/ppt-master/scripts/**/*.py").split(";") if x]
+
+
+def _read_denied(target: Path) -> bool:
+    """The author reads the workflow's documents and the project, never the scripts' source (DeepSeek, mx-deepseek)."""
+    rel = target.relative_to(ROOT).as_posix() if target.is_relative_to(ROOT) else str(target)
+    from fnmatch import fnmatch
+    return any(fnmatch(rel, pattern) for pattern in READ_DENY)
+
+
 def tool_read_file(path: str, start: int = 1, end: int | None = None) -> str:
     target = _inside(path)
+    if _read_denied(target):
+        return "not readable by the author: this is script source. The workflow documents under skills/ppt-master (SKILL.md, workflows/, references/, scripts/docs/) say what each script does; run it with run_script."
     if target.is_dir():
         return "\n".join(sorted(p.name + ("/" if p.is_dir() else "") for p in target.iterdir()))
     if target.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp"):
@@ -116,6 +160,9 @@ def tool_list_dir(path: str = ".") -> str:
     return "\n".join(rows)
 
 
+SCRIPT_TIMEOUT_FLOOR_S = 1200
+
+
 def tool_run_script(script: str, args: list[str] | None = None, timeout_s: int = 900) -> str:
     script = script.replace("\\", "/")
     for prefix in ("skills/ppt-master/scripts/", str(SCRIPTS).replace("\\", "/") + "/"):
@@ -135,6 +182,10 @@ def tool_run_script(script: str, args: list[str] | None = None, timeout_s: int =
             looks_like_path = " " not in item and ("/" in item or "\\" in item)
             safe_args.append(str(candidate) if candidate.exists() or looks_like_path else item)
     started = time.monotonic()
+    # The author picks a timeout per call, and a short one (120 s) killed an independent review that was still working - the call was
+    # billed and its verdict lost (Harrowgate, 24 Sep 2026). A review or a render under load is bounded by the script itself, so the
+    # author may lengthen the wait but never shorten it below this floor.
+    timeout_s = max(int(timeout_s or 0), SCRIPT_TIMEOUT_FLOOR_S)
     proc = subprocess.run(
         [str(PY), str(script_path), *safe_args], cwd=str(ROOT), env=_env_for_scripts(),
         capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout_s,
@@ -199,9 +250,12 @@ def _log(transcript: Path, record: dict) -> None:
 
 
 def _call(payload: dict, transcript: Path) -> dict:
+    if "anthropic.com" in API_BASE:  # Claude: the Messages API through the official SDK, answered in Responses shape (anthropic_backend.py)
+        import anthropic_backend
+        return anthropic_backend.respond(payload, _key())
     request = urllib.request.Request(
-        "https://api.openai.com/v1/responses", data=json.dumps(payload).encode("utf-8"),
-        headers={"Authorization": f"Bearer {_key()}", "Content-Type": "application/json"}, method="POST",
+        API_BASE + "/responses", data=json.dumps(payload).encode("utf-8"),
+        headers={"Authorization": f"Bearer {_key()}", "Content-Type": "application/json", **EXTRA_HEADERS}, method="POST",
     )
     for attempt in range(4):
         try:
@@ -214,7 +268,8 @@ def _call(payload: dict, transcript: Path) -> dict:
                 time.sleep(15 * (attempt + 1))
                 continue
             raise
-        except (urllib.error.URLError, ConnectionError, TimeoutError, OSError) as exc:
+        except (urllib.error.URLError, ConnectionError, TimeoutError, OSError, http.client.HTTPException, json.JSONDecodeError) as exc:
+            # http.client.IncompleteRead (a body cut off mid-read) is an HTTPException, not an OSError: it killed four page sessions at once (pga-par3)
             # A closed connection or a transport fault is re-sent: the request is idempotent on our side
             # (the same previous_response_id and the same inputs).
             _log(transcript, {"event": "transport_error", "error": repr(exc)[:300], "attempt": attempt})
@@ -225,8 +280,14 @@ def _call(payload: dict, transcript: Path) -> dict:
     raise RuntimeError("unreachable")
 
 
+SYSTEM_FILE = Path(os.environ["PPT_MASTER_SYSTEM_FILE"]) if os.environ.get("PPT_MASTER_SYSTEM_FILE") else None
+
+
 def system_prompt() -> str:
-    text = (ROOT / "AGENTS.md").read_text(encoding="utf-8") + "\n\n" + (ROOT / "skills" / "ppt-master" / "SKILL.md").read_text(encoding="utf-8")
+    if SYSTEM_FILE:  # a page author (deck_runner.py): its whole brief, identical across the deck's pages so the prefix caches
+        text = SYSTEM_FILE.read_text(encoding="utf-8")
+    else:
+        text = (ROOT / "AGENTS.md").read_text(encoding="utf-8") + "\n\n" + (ROOT / "skills" / "ppt-master" / "SKILL.md").read_text(encoding="utf-8")
     return text + (
         "\n\n# Host notes\n"
         f"You are running inside a tool harness. SKILL_DIR is {ROOT / 'skills' / 'ppt-master'} and the repository root is {ROOT}. "
@@ -245,12 +306,16 @@ def _write_run_blocks(session: str, usage_total: dict) -> None:
     for journal_path in (ROOT / "projects").glob("*/quality-run.json"):
         if journal_path.stat().st_mtime < SESSION_STARTED:
             continue
-        journal = json.loads(journal_path.read_text(encoding="utf-8"))
-        runs = journal.setdefault("run", {})
-        earlier = (runs.get(session) or {}).get("images_delivered", 0)
-        runs[session] = {"host": "responses_api", "model": MODEL, "effort": EFFORT, "usage": usage_total,
-                         "images_delivered": earlier + len(DELIVERED)}
-        journal_path.write_text(json.dumps(journal, indent=1, ensure_ascii=False), encoding="utf-8")
+        def stamp(journal: dict, session=session) -> None:
+            runs = journal.setdefault("run", {})
+            earlier = (runs.get(session) or {}).get("images_delivered", 0)
+            runs[session] = {"host": "responses_api", "model": MODEL, "effort": EFFORT, "usage": usage_total,
+                             "images_delivered": earlier + len(DELIVERED)}
+
+        if str(SCRIPTS) not in sys.path:
+            sys.path.insert(0, str(SCRIPTS))
+        from page_review import update_journal  # the journal is shared by pages authored in parallel
+        update_journal(journal_path.parent, stamp)
 
 
 def main() -> int:
@@ -260,7 +325,7 @@ def main() -> int:
     parser.add_argument("--task-file", help="a file holding the first user message")
     parser.add_argument("--max-calls", type=int, default=400, help="deck-level ceiling on model calls across the whole session")
     parser.add_argument("--answer", help="the user's answer at a gate (continues the session)")
-    parser.add_argument("--max-turns", type=int, default=60)
+    parser.add_argument("--max-turns", type=int, default=200)
     parser.add_argument("--resume-pending", action="store_true", help="re-send the tool outputs a crashed turn never delivered")
     args = parser.parse_args()
     session_dir = OUT / args.session
@@ -286,18 +351,30 @@ def main() -> int:
     else:
         raise SystemExit("give --task, --answer or --resume-pending")
     usage_total = state.get("usage_total") or {"input_tokens": 0, "cached": 0, "output_tokens": 0, "reasoning": 0, "calls": 0}
-    _log(transcript, {"event": "start", "model": MODEL, "effort": EFFORT, "at": time.time(), "task": args.task, "answer": args.answer})
+    history_path = session_dir / "history.json"
+    history: list = json.loads(history_path.read_text(encoding="utf-8")) if STATELESS and history_path.is_file() and not args.task else []
+    _log(transcript, {"event": "start", "model": MODEL, "effort": EFFORT, "api_base": API_BASE, "stateless": STATELESS, "at": time.time(), "task": args.task, "answer": args.answer})
     for turn in range(args.max_turns):
         state["pending_input"] = [item for item in input_items if not (isinstance(item, dict) and item.get("role") == "user" and isinstance(item.get("content"), list))]
         state_path.write_text(json.dumps(state, indent=1), encoding="utf-8")
-        payload = {"model": MODEL, "instructions": system_prompt(), "input": input_items, "tools": TOOLS,
-                   "reasoning": {"effort": EFFORT}, "store": True}
-        if previous_id:
+        if STATELESS:
+            answered = {x.get("call_id") for x in history if isinstance(x, dict) and x.get("type") == "function_call_output"}
+            # a resumed turn's outputs may already be in the saved history: never send one call's output twice
+            history.extend(i for i in input_items if not (isinstance(i, dict) and i.get("type") == "function_call_output" and i.get("call_id") in answered))
+            input_items = []
+            history_path.write_text(json.dumps(history, ensure_ascii=False), encoding="utf-8")
+        payload = {"model": MODEL, "instructions": system_prompt(), "input": history if STATELESS else input_items, "tools": TOOLS,
+                   "reasoning": {"effort": EFFORT}, "store": not STATELESS}
+        if previous_id and not STATELESS:
             payload["previous_response_id"] = previous_id
+        if PROVIDER and "openrouter" in API_BASE:
+            payload["provider"] = PROVIDER
         if usage_total["calls"] >= args.max_calls:
             print(f"call ceiling reached ({args.max_calls}): stopping with the work on disk; continue with --answer and a higher --max-calls")
             break
+        requested_at = time.time()
         response = _call(payload, transcript)
+        api_s = round(time.time() - requested_at, 2)
         previous_id = response.get("id")
         usage = response.get("usage") or {}
         usage_total["input_tokens"] += usage.get("input_tokens", 0)
@@ -308,9 +385,11 @@ def main() -> int:
         state.update({"last_response_id": previous_id, "usage_total": usage_total, "pending_input": []})
         state_path.write_text(json.dumps(state, indent=1), encoding="utf-8")
         outputs = response.get("output") or []
+        if STATELESS:
+            history.extend(outputs)
         calls = [item for item in outputs if item.get("type") == "function_call"]
         texts = [c.get("text") for item in outputs if item.get("type") == "message" for c in item.get("content") or [] if c.get("type") == "output_text"]
-        _log(transcript, {"event": "turn", "turn": turn, "usage": usage, "calls": [(c.get("name"), (c.get("arguments") or "")[:300]) for c in calls], "text": "\n".join(texts)[:6000]})
+        _log(transcript, {"event": "turn", "turn": turn, "usage": usage, "at": time.time(), "api_s": api_s, "calls": [(c.get("name"), (c.get("arguments") or "")[:300]) for c in calls], "text": "\n".join(texts)[:6000]})
         print(f"turn {turn}: {len(calls)} tool call(s); tokens in {usage.get('input_tokens')} out {usage.get('output_tokens')}", flush=True)
         if not calls:
             (session_dir / "last_message.md").write_text("\n".join(texts), encoding="utf-8")
@@ -324,7 +403,7 @@ def main() -> int:
                 result = HANDLERS[name](**fn_args)
             except Exception as exc:  # noqa: BLE001
                 result = f"error: {type(exc).__name__}: {exc}"
-            _log(transcript, {"event": "tool", "name": name, "args": (call.get("arguments") or "")[:2000], "result": result[:4000]})
+            _log(transcript, {"event": "tool", "name": name, "args": (call.get("arguments") or "")[:2000], "result": result[:4000], "at": time.time()})
             print(f"  {name} {(call.get('arguments') or '')[:120]} -> {result[:100].replace(chr(10), ' ')}", flush=True)
             input_items.append({"type": "function_call_output", "call_id": call.get("call_id"), "output": result})
         if PENDING_IMAGES:
@@ -336,6 +415,10 @@ def main() -> int:
             _log(transcript, {"event": "images_delivered", "paths": [rel for rel, _ in PENDING_IMAGES]})
             input_items.append({"role": "user", "content": content})
             PENDING_IMAGES.clear()
+    else:  # the turn ceiling: keep the executed tool outputs so --resume-pending continues the same turn
+        state["pending_input"] = input_items
+        state_path.write_text(json.dumps(state, indent=1), encoding="utf-8")
+        print(f"turn ceiling reached ({args.max_turns}): tool outputs kept; continue with --resume-pending and a higher --max-turns", flush=True)
     _log(transcript, {"event": "end", "usage_total": usage_total, "at": time.time()})
     _write_run_blocks(args.session, usage_total)
     print("usage", usage_total)

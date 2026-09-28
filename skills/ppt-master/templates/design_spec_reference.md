@@ -168,7 +168,11 @@ One ordered Slide block per page; count and order equal §I `Page Count`; `Conte
 #### Slide 01 - <page name>
 
 - **Audience move**: <audience state before → after>
+- **Audience question**: <reader's question now?>
+- **Story link**: <why this follows and what it prepares>
 - **Relationships**: <the page's semantic units and the source-stated order / link / parent / membership / contrast / overlap among them, or none; no shape, carrier, or authoring words>
+- **Visual task**: <what must be seen, compared, traced or located>
+- **Visual approach**: <Reference — suitable carrier and why; Executor may change it>
 - **Composition**: <Reference — macro composition, hierarchy, and visual focus as a starting sketch; chosen prototype when template-active; optional at brief depth>
 - **Title**: <preferred page title>
 - **Core message**: <one governing assertion>

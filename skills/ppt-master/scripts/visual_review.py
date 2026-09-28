@@ -155,7 +155,7 @@ def parse_slide_canvas(svg_content: str, page_name: str) -> dict:
     }
 
 
-def render_pages(server_url: str, pages: list[str], preview_dir: Path) -> list[dict]:
+def render_pages(server_url: str, pages: list[str], preview_dir: Path, browser=None) -> list[dict]:
     """Render all requested pages in a single browser session.
 
     Each render: page.goto(server_url) anchors the base URL so the SVG's
@@ -166,7 +166,6 @@ def render_pages(server_url: str, pages: list[str], preview_dir: Path) -> list[d
     from playwright.sync_api import sync_playwright
 
     preview_dir.mkdir(parents=True, exist_ok=True)
-    records: list[dict] = []
 
     inject_js = """
 ({svgContent, width, height}) => {
@@ -178,63 +177,76 @@ def render_pages(server_url: str, pages: list[str], preview_dir: Path) -> list[d
 }
 """
 
+    if browser is not None:  # a caller that already holds a browser (page_review render) lends it: no second launch
+        return _render_in(browser, server_url, pages, preview_dir, inject_js, close=False)
     with sync_playwright() as p:
         # An installed browser (msedge, chrome) can stand in for the bundled
         # chromium download: PPT_MASTER_BROWSER_CHANNEL names the channel.
         channel = os.environ.get('PPT_MASTER_BROWSER_CHANNEL') or None
-        browser = p.chromium.launch(channel=channel)
-        try:
-            context = browser.new_context()
-            for page_name in pages:
-                rec: dict = {'page': page_name, 'ok': False}
-                try:
-                    svg_content = fetch_slide_content(server_url, page_name)
-                    canvas = parse_slide_canvas(svg_content, page_name)
-                    rec['canvas'] = canvas
-                except urllib.error.URLError as e:
-                    rec['error'] = f'server_unreachable: {e!r}'
-                    records.append(rec)
-                    continue
-                except Exception as e:  # noqa: BLE001
-                    rec['error'] = f'{type(e).__name__}: {e}'
-                    records.append(rec)
-                    continue
+        return _render_in(p.chromium.launch(channel=channel), server_url, pages, preview_dir, inject_js, close=True)
 
-                stem = page_name[:-4] if page_name.endswith('.svg') else page_name
-                out_path = preview_dir / f'{stem}.png'
 
-                pg = None
-                try:
-                    pg = context.new_page()
-                    pg.set_viewport_size({
-                        'width': canvas['png_width'],
-                        'height': canvas['png_height'],
-                    })
-                    pg.goto(server_url, wait_until='domcontentloaded')
-                    pg.evaluate(inject_js, {
-                        'svgContent': svg_content,
-                        'width': canvas['width'],
-                        'height': canvas['height'],
-                    })
-                    # Wait one frame so font/text shaping settles before capture.
-                    pg.wait_for_timeout(100)
-                    png_bytes = pg.screenshot(type='png', full_page=False)
-
-                    out_path.write_bytes(png_bytes)
-                    rec['path'] = str(out_path)
-                    rec['bytes'] = len(png_bytes)
-                    rec['all_background'] = is_all_background(png_bytes)
-                    rec['ok'] = True
-                except Exception as e:  # noqa: BLE001 — best-effort per-page
-                    rec['error'] = f'{type(e).__name__}: {e}'
-                finally:
-                    if pg is not None:
-                        try:
-                            pg.close()
-                        except Exception:  # noqa: BLE001 — cleanup is best-effort
-                            pass
+def _render_in(browser, server_url: str, pages: list[str], preview_dir: Path, inject_js: str, close: bool) -> list[dict]:
+    records: list[dict] = []
+    context = None
+    try:
+        context = browser.new_context()
+        for page_name in pages:
+            rec: dict = {'page': page_name, 'ok': False}
+            try:
+                svg_content = fetch_slide_content(server_url, page_name)
+                canvas = parse_slide_canvas(svg_content, page_name)
+                rec['canvas'] = canvas
+            except urllib.error.URLError as e:
+                rec['error'] = f'server_unreachable: {e!r}'
                 records.append(rec)
-        finally:
+                continue
+            except Exception as e:  # noqa: BLE001
+                rec['error'] = f'{type(e).__name__}: {e}'
+                records.append(rec)
+                continue
+
+            stem = page_name[:-4] if page_name.endswith('.svg') else page_name
+            out_path = preview_dir / f'{stem}.png'
+
+            pg = None
+            try:
+                pg = context.new_page()
+                pg.set_viewport_size({
+                    'width': canvas['png_width'],
+                    'height': canvas['png_height'],
+                })
+                pg.goto(server_url, wait_until='domcontentloaded')
+                pg.evaluate(inject_js, {
+                    'svgContent': svg_content,
+                    'width': canvas['width'],
+                    'height': canvas['height'],
+                })
+                # Wait one frame so font/text shaping settles before capture.
+                pg.wait_for_timeout(100)
+                png_bytes = pg.screenshot(type='png', full_page=False)
+
+                out_path.write_bytes(png_bytes)
+                rec['path'] = str(out_path)
+                rec['bytes'] = len(png_bytes)
+                rec['all_background'] = is_all_background(png_bytes)
+                rec['ok'] = True
+            except Exception as e:  # noqa: BLE001 — best-effort per-page
+                rec['error'] = f'{type(e).__name__}: {e}'
+            finally:
+                if pg is not None:
+                    try:
+                        pg.close()
+                    except Exception:  # noqa: BLE001 — cleanup is best-effort
+                        pass
+            records.append(rec)
+    finally:
+        try:
+            if context is not None:
+                context.close()
+        except Exception:  # noqa: BLE001 - cleanup is best-effort
+            pass
+        if close:
             browser.close()
 
     return records

@@ -198,6 +198,7 @@
         "skills/ppt-master/workflows/generate-pptx.md",
         "skills/ppt-master/references/strategist.md",
         "skills/ppt-master/references/plan-core.md",
+        "skills/ppt-master/references/diagram-clarity.md",
         "skills/ppt-master/references/strategist-image.md",
         "skills/ppt-master/references/canvas-formats.md",
         "skills/ppt-master/templates/design_spec_reference.md",
@@ -2169,7 +2170,7 @@
             {
               "path": "skills/ppt-master/references/plan-core.md",
               "role": "reference",
-              "fingerprint": "2fd03eac49a4",
+              "fingerprint": "f85145f8991c",
               "reason": "This shared planning core states the reading-mode lean of the tag as a bias, not a quota; the grammar stays with the schema."
             }
           ]
