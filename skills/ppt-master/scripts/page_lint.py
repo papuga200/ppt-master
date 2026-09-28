@@ -428,6 +428,7 @@ def analyse(geometry: dict, png_bytes: bytes | None = None, content_area=None, i
 # a stage note or a label (secondary), and so is a single line of moderate width (a caption, a one-line descriptor). Tuned on the
 # 28 Sep self-documentation deck, whose 352-368 px margin notes and one-line route descriptions are callouts, not prose.
 BODY_PARAGRAPH_SHARE, BODY_LINE_SHARE = 0.30, 0.50
+TEMPLATE_CTX = {"role:chrome", "layer:master", "layer:layout"}
 FURNITURE_CTX = {"role:chrome", "role:footer", "role:header", "role:page-number", "role:logo", "role:background", "layer:master", "layer:layout",
                  "ph:footer", "ph:slide-number", "ph:date", "ph:sldnum", "ph:ftr", "ph:dt"}
 FURNITURE_ID = re.compile(r"(?i)(?:^|[-_])(?:chrome|footer|folio|running|(?:page|slide|deck|top)-?header|page-?number|slide-?number|page-?num|tracker|breadcrumb|eyebrow|kicker)(?:[-_]|$)")
@@ -482,6 +483,7 @@ def classify_roles(texts: list[dict], shapes: list[dict], width: float, height: 
         size = max(sizes) if sizes else 0
         declared = next((c.split(":", 1)[1] for c in ctx if c.startswith("tr:")), None)
         lines = len(t.get("lines") or [])
+        t["template_owned"] = bool(set(ctx) & TEMPLATE_CTX)  # copied verbatim from the template: the page author may not resize it
         if declared in DECLARED_ROLES:
             role, why = declared, "declared data-type-role"
         elif set(ctx) & FURNITURE_CTX:
@@ -570,6 +572,8 @@ def type_findings(texts: list[dict], page: dict, width: float, height: float) ->
         if px <= 0 or px >= floor - 0.05:
             continue
         owner = next((g for g in (t.get("groups") or []) if g and g.lower() not in ("page", "content", "body")), None)
+        if t.get("template_owned"):
+            owner = "template:" + (owner or "chrome")
         key = (role, round(px, 1), owner)
         entry = groups.setdefault(key, {"rects": [], "texts": [], "why": t.get("role_why") or ""})
         entry["rects"].append(_box(t))
@@ -582,6 +586,13 @@ def type_findings(texts: list[dict], page: dict, width: float, height: float) ->
         sample = "; ".join(f'"{x}"' for x in entry["texts"][:3]) + (f" and {len(entry['texts']) - 3} more" if len(entry["texts"]) > 3 else "")
         where = f" in {owner}" if owner else ""
         label = "furniture (header, footer, folio, eyebrow)" if role == "furniture" else role
+        if owner and owner.startswith("template:"):
+            # the template's chrome is copied verbatim; the page author cannot change it, so it never blocks a page
+            findings.append({"kind": "TEMPLATE_TYPE", "severity": "note", "hard": False, "rect": [round(v, 1) for v in rect], "role": role,
+                             "px": px, "floor": floor, "count": len(entry["texts"]),
+                             "message": f"{len(entry['texts'])} template {label} text(s) at {px:g} px, under the {floor:g} px floor: {sample}. "
+                                        "This belongs to the template (keep it exactly as the chrome source draws it); it is reported for the template, not for this page"})
+            continue
         findings.append({"kind": "MIN_TYPE", "severity": "blocker", "hard": True, "rect": [round(v, 1) for v in rect], "role": role, "px": px, "floor": floor,
                          "count": len(entry["texts"]),
                          "message": f"{len(entry['texts'])} {label} text(s){where} at {px:g} px, under the {floor:g} px floor for {role} "

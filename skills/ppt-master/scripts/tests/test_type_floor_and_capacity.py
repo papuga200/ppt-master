@@ -49,7 +49,7 @@ def run(texts, shapes=(), lines=(), page=PAGE, images=()):
 
 
 def kinds(findings):
-    return sorted((f["kind"], f.get("role"), f.get("px")) for f in findings if f["kind"] in ("MIN_TYPE",))
+    return sorted((f["kind"], f.get("role"), f.get("px")) for f in findings if f["kind"] in ("MIN_TYPE", "TEMPLATE_TYPE"))
 
 
 def roles(texts, shapes=(), sparse=False):
@@ -115,7 +115,8 @@ def test_text_at_its_floor_is_clean_and_each_role_has_its_own_floor():
     assert kinds(run(clean)) == []
     small = [title(), text("A paragraph of running text across the page\nsecond line", 72, 200, size=15, width=700, lines=2),
              text("Deck line", 72, 686, size=10, width=300, ctx=["role:chrome"])]
-    assert kinds(run(small)) == [("MIN_TYPE", "body", 15.0), ("MIN_TYPE", "furniture", 10.0)]
+    # chrome copied from the template is the template's to fix: a note, never a page blocker
+    assert kinds(run(small)) == [("MIN_TYPE", "body", 15.0), ("TEMPLATE_TYPE", "furniture", 10.0)]
 
 
 def test_a_scaled_group_is_measured_at_its_effective_size():
@@ -310,3 +311,15 @@ def test_the_browser_reports_effective_size_under_a_scaled_group(tmp_path):
         pytest.skip(f"browser unavailable: {exc}")
     certain = [f for f in result["blockers"] if f["kind"] == "MIN_TYPE"]
     assert [(f["role"], f["px"]) for f in certain] == [("secondary", 12.0)]
+
+
+def test_template_owned_chrome_text_is_a_note_not_a_blocker():
+    import page_lint
+    base = {"rect": [1000, 690, 1170, 703], "lines": [{"rect": [1000, 690, 1170, 703], "size": 10}], "size": 10, "text": "Firm · Client",
+            "groups": ["chrome"], "role": "furniture", "role_why": "chrome, running header or footer", "px": 10.0}
+    owned = dict(base, template_owned=True)
+    authored = dict(base, template_owned=False, groups=["footer"])
+    kinds = [f["kind"] for f in page_lint.type_findings([owned], {}, 1280, 720)]
+    assert kinds == ["TEMPLATE_TYPE"]
+    finding = page_lint.type_findings([authored], {}, 1280, 720)[0]
+    assert finding["kind"] == "MIN_TYPE" and finding["hard"]
