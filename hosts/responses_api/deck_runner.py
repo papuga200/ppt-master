@@ -136,7 +136,9 @@ The header, the title zone and the footer are the deck's chrome. When your job n
 Measured across 150 pages by ten models; each one has cost authors revisions or shipped as a defect.
 - RELATIONSHIPS ARE DRAWN, NOT WRITTEN. Every relationship the record names is on the figure: a dependency is an arrow from one thing to the other; a milestone or gate is named AT its week on the chart; a flow is connected shapes. A caption list, a footnote, a strip below the chart or a legend never stands in for a drawn relationship. Before your first review, check the render against every `Avoid` line of your record.
 - TEXT FIT BEFORE RENDER. Estimate every single-line string: about 0.55 x font size x characters (0.6 for bold or capitals). If it exceeds its zone, shorten the words or wrap them before you render. Never shrink a title or the chrome to make something fit.
-- LEADING. The distance between the baselines of two lines of one paragraph is at least 1.4 x the font size for body text and labels (17 px at 12 px, 15-16 px at 11 px) and at least 1.15 x for titles. Never write a smaller `dy`.
+- TYPE FLOOR. Nothing is set under its floor (1280 x 720 canvas, or the lock's `## type_floor`): running text and list items 16 px; table cells, diagram and chart labels, callouts and captions 14 px; sources, footnotes, header, footer and folio 11 px. The lint measures every text's rendered size (a scaled group counts) and reports `MIN_TYPE` as CERTAIN; a title under its layout's size is `TITLE_SHRUNK`. Never shrink below the floor to fit: cut the copy (the record allows shortening), move detail to the page's notes or an appendix, or change the exhibit (fewer columns, a chart instead of a table, two pages instead of one). When the geometry cannot tell what a text is, say it: `data-type-role="body|secondary|footnote|furniture|title"` on the text or its group (consulting-typesetting.md §8).
+- FILL THE BODY. `DEAD_BAND` (an empty band across the page over 15% of the body height), `UNDERFILLED` (content in under 55% of it) and `HUDDLED` (the figure squeezed into a strip) are flagged for the reviewer: use the space - a larger figure, type above the floor, the takeaway or evidence moved into the gap - unless the whitespace frames a hero element on purpose.
+- LEADING. The distance between the baselines of two lines of one paragraph is at least 1.4 x the font size for body text and labels (20 px at 14 px, 22-23 px at 16 px) and at least 1.15 x for titles. Never write a smaller `dy`.
 - NATIVE TABLES. The render's lint runs the exporter's own table check (`NATIVE` findings): inside a `data-pptx-replace-with="table"` group every wrapped cell line ends with a space before the next `<tspan>` (or the lines are the cell's `paragraphs`), punctuation is identical in the drawing and the JSON, and any colour, weight, size or alignment you give a drawn cell is set on that cell in the JSON. Use only the schema's fields.
 - NEVER SILENCE THE LINT. Do not widen `data-pptx-bounds` past the body zone or margins, and do not wrap modules in a new group to make a finding disappear: fix the geometry.
 - TOOLS. Copy file paths exactly from your job (character for character - a hyphen is not an underscore). Never batch two edits that touch the same passage, and never send an edit whose old and new text are equal. Do not read your own file back after writing it: the render shows it. Leave `timeout_s` unset.
@@ -225,6 +227,7 @@ Plan in this order:
 3. SLIDE RECORDS. For every Slide NN record, write: Role, Author tier, Layout, Audience question (one question the reader has at that point), Audience move (before to after), Story link (why this follows the previous slide and prepares the next), Relationships (source-stated semantic units and their order, link, parent, membership, contrast or overlap; or none), Title (a clear answer rather than a topic label), Core message (one governing claim), Content (all visible claims, definitions, example labels, numbers and qualifiers in reader-facing language), Sources, Visual task (what the reader must see, compare, trace or locate to answer the question), Visual approach (a nonbinding suggested form and why it fits), Composition (nonbinding macro grouping, focal point and reading path, without coordinates), Hierarchy, Avoid, Reference, Editor notes, and data class where relevant. Each field has its own Markdown bullet line; do not put Role, Author tier and Layout on one line. Use headings exactly `#### Slide 01 - Name` (ASCII hyphen). Author tier is frontier for a page requiring complex visual judgement and workhorse for simpler pages. Layout must be among supplied template layouts when a base template is present. Use reference_library.py forms and a form's sheet to select at most two structural references for a body page, naming what to borrow without copying content.
 4. VISUAL REASONING. Start from the question and evidence, then select the information relationship: comparison, sequence, process, hierarchy, boundary, connection, distribution, trend, part-to-whole, spatial arrangement, or a concrete example. Suggest a fitting carrier in Visual approach: direct evidence image, annotated example, chart, table, diagram, timeline, or concise prose where it explains better. Do not require a diagram on every slide. A diagram must have a scope/title, a clear reading direction when order matters, named entities, directly labelled non-obvious links, and a boundary when inclusion matters. Show only the level of detail needed for the reader's question; use context before component detail when complexity warrants it. Give one stable meaning to a visual cue across the deck. Leave exact shape selection, coordinates, element sizes, and fit to the page author.
 5. COLD READ. Review the titles and visible Content alone, in order, with no solution, narrative notes, or speaker. Can a first-time reader say what this is, why each page matters, how evidence supports its claim, and what follows? Define a term when first used; expand unusual abbreviations, explain internal names and week codes, and remove references to unseen documents. A complex figure needs a plain reading sentence in visible copy. Repair missing bridges, unsupported claims, and jargon before drawing. Do not add padding to satisfy a word count: an illustrative page can be spare, while a reference or data page can be fuller if type remains readable.
+6. CAPACITY AND TITLES. Every record must fit its layout at the legible type floors: body text 16 px, table cells, diagram and chart labels, callouts and captions 14 px, sources and footnotes 11 px (1280 x 720 canvas; a lock may declare other floors in `## type_floor`). The plan check sets each record's Content at those floors with the locked fonts in the area its layout gives content, and refuses a record that needs more (OVER_CAPACITY) - a table is counted at its wrapped height. Authors are told never to shrink type below a floor to fit, so a record over capacity cannot be drawn: cut the copy to what the page's question needs, split the page, or move detail to an appendix page. Being under capacity is never a fault; a spare page is a choice. Each Title is a full-sentence claim of 15 words or fewer that sets in at most two lines at the locked title size in its layout's title box (TITLE_FIT); shorten it, never plan a smaller title size. The fill ratio of every record is written to `.review/plan_capacity.md`.
 
 Every high-impact factual or quantitative claim needs a source, or an explicit Data class: scenario; never invent company-specific owners, credentials, budgets, approvals, or measured outcomes. Use [To be provided: <what>] where the brief needs a fact the sources lack. Keep internal production instructions in Editor notes, not client-facing copy. A page may show a candid limitation where it changes the reader's judgement; group routine caveats on the page that owns them.
 
@@ -274,7 +277,6 @@ def keep_or_restore(before: dict, after: dict) -> str:
 
 
 PLANNER_EXAMPLES = Path(__file__).resolve().parent / "planner_examples"
-REFERENCE_DENSITY = (480, 1172, 514)  # Meridian's liked plan: ~480 words of Content per body page on a 1172 x 514 body zone, Segoe UI
 FILLER = re.compile(r"(?i)\b(to assess|tbd|to be confirmed|lorem ipsum)\b")
 INTERNAL = re.compile(r"(?i)(submission blocker|before (?:submission|filing)|not ready to (?:file|submit)|must be (?:inserted|verified|completed) before)")
 
@@ -318,8 +320,182 @@ def undefined_terms(spec: str) -> dict[str, list[str]]:
     return found
 
 
-def plan_lint(spec: str, target_low: int | None = None) -> dict[str, list[str]]:
-    """Check the semantic handoff and reader-facing copy without imposing density or geometry quotas."""
+# ---------------------------------------------------------------------------------------------------------------------------
+# Capacity contract between plan and page (F02). A record's planned copy is set at the type floors (body 16 px, secondary 14 px,
+# footnote 11 px, or the lock's `## type_floor`) with the locked fonts' real metrics, and compared with the area the record's
+# layout gives its content. The author is told never to shrink below the floor to fit, so a record over capacity is a plan defect:
+# cut, split the page, or move detail to notes or an appendix. Under capacity is never an error: density is a choice.
+# ---------------------------------------------------------------------------------------------------------------------------
+TEXT_FILL = 0.45          # share of a layout's content area that running text and labels can occupy on a packed, legible page (the
+                          # rest is gutters, padding, rules, shapes and ragged line ends); calibrated on the 28 Sep, kirkland2 and meridian decks
+OVER_CAPACITY_RATIO = 1.10  # a record is refused only when it needs clearly more than the page holds: the estimate is +/- 10%
+COPY_SKIP_KEY = re.compile(r"(?i)^(?:running head|running header|eyebrow|kicker|folio|footer|page number|section code|tracker|chrome|layout|composition)\b")
+FOOT_KEY = re.compile(r"(?i)^(?:source|sources|source line|footnote|footnotes|note line|provenance)\b")
+SECONDARY_KEY = re.compile(r"(?i)\b(?:rows?|cells?|columns?|cols?|header|table|chart|axis|labels?|nodes?|lanes?|bars?|steps?|stages?|legend|ticks?|milestones?"
+                           r"|gates?|phases?|exhibit|captions?|chips?|badges?|callouts?|annotations?|gloss(?:es)?|markers?|data|area \d+|box(?:es)?|cards?)\b")
+SAMPLE_PROSE = ("Every reported measure traces to an approved source, a named owner and a stated definition, so the board can compare "
+                "results across business units without re-checking the numbers by hand.")
+
+
+def _skill_scripts() -> None:
+    if str(SCRIPTS) not in sys.path:
+        sys.path.insert(0, str(SCRIPTS))
+
+
+def _copy_words(text: str) -> int:
+    return len([w for w in re.split(r"\s+", text) if re.search(r"[^\W_]", w)])
+
+
+def planned_copy(block: str) -> dict:
+    """The visible words a record plans, by the floor they will be set at: {'body', 'secondary', 'footnote'} word counts and any
+    planned table ({'rows': [[cell, ...], ...]}) from a `Rows:` line (`a · b | c · d`) or keyed `row N <field>:` lines."""
+    _skill_scripts()
+    import type_floor
+    content = type_floor.record_field(block, "Content")
+    counts = {"body": 0, "secondary": 0, "footnote": 0}
+    keyed_rows: dict[int, list[str]] = {}
+    table_rows: list[list[str]] = []
+    header: list[str] = []
+    for raw in content.splitlines():
+        line = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", raw).strip()
+        if not line:
+            continue
+        key, value = "", line
+        match = re.match(r"^([A-Za-z][\w /()&'.,+-]{0,48}?)\s*:\s+(.*)$", line)
+        if match and "`" not in match.group(1) and len(match.group(1).split()) <= 6:
+            key, value = match.group(1).strip(), match.group(2)
+        if COPY_SKIP_KEY.match(key):
+            continue
+        plain = re.sub(r"[`*_]|\[To be provided:\s*", " ", value).replace("]", " ")
+        quoted = re.findall(r"`([^`]+)`", value)
+        cells = quoted if len(quoted) >= 2 else [c.strip() for c in re.split(r"\s+·\s+|\s*\|\s*", plain) if c.strip()]
+        row = re.match(r"(?i)^row\s*(\d+)\b", key)
+        if row:  # `Row 3: a · b · c` is a whole row; `row 3 proof: ...` is one cell of it
+            keyed_rows.setdefault(int(row.group(1)), []).extend(cells if re.fullmatch(r"(?i)row\s*\d+", key) else [plain.strip()])
+            counts["secondary"] += _copy_words(plain)
+            continue
+        if re.match(r"(?i)^(?:rows|table rows|cells)$", key) and "|" in value:
+            table_rows.extend([[c.strip() for c in re.split(r"\s+·\s+|\s*;\s+", part) if c.strip()] for part in plain.split("|")])
+            counts["secondary"] += _copy_words(plain)
+            continue
+        if re.match(r"(?i)^(?:exhibit )?(?:columns|column headers|headers)$", key):
+            header = cells
+            counts["secondary"] += _copy_words(plain)
+            continue
+        role = "footnote" if FOOT_KEY.match(key) or re.match(r"(?i)^\s*source:", plain) else "secondary" if key and SECONDARY_KEY.search(key) else "body"
+        counts[role] += _copy_words(plain)
+    rows = table_rows or [keyed_rows[k] for k in sorted(keyed_rows)]
+    table = {"rows": rows, "header": header} if len(rows) >= 2 else None
+    return {**counts, "table": table, "total": sum(counts.values())}
+
+
+def _word_area(size: float, family: str, pitch: float) -> float:
+    """Area one average word occupies at `size` px: real advance width of sample prose per word, times the line pitch."""
+    _skill_scripts()
+    import text_measure
+    width = text_measure.measure_real(SAMPLE_PROSE, size=size, family=family)
+    return width / max(1, len(SAMPLE_PROSE.split())) * size * pitch
+
+
+def table_height(table: dict, width: float, size: float, family: str) -> float:
+    """Height of a planned table at `size` px across `width`: columns sized to their longest cell (bounded), each cell wrapped with
+    real metrics inside 8 px side padding, rows 1.3 x size per line plus 12 px of padding (consulting-typesetting.md §3)."""
+    _skill_scripts()
+    import text_measure
+    rows = [r for r in table["rows"] if r]
+    columns = max(len(r) for r in rows + ([table["header"]] if table.get("header") else []))
+    grid = ([table["header"]] if table.get("header") else []) + rows
+    longest = [max((text_measure.measure_real(r[c], size=size, family=family) if c < len(r) else 0.0) for r in grid) for c in range(columns)]
+    total = sum(max(60.0, v) for v in longest) or 1.0
+    widths = [width * max(60.0, v) / total for v in longest]
+    height = 0.0
+    for r in grid:
+        lines = max(len(text_measure.wrap_real(r[c], size=size, max_width=max(24.0, widths[c] - 16), family=family)) if c < len(r) and r[c] else 1
+                    for c in range(columns))
+        height += max(2.2 * size, lines * 1.3 * size + 12)
+    return height
+
+
+def record_capacity(copy: dict, area: dict, family: str, floors: dict) -> dict:
+    """Required area of a record's copy at the floors against the text area its layout offers. Returns the words it plans, the words
+    a page of this layout holds at the record's own body/secondary/footnote mix, and the fill ratio (1.0 = full)."""
+    body_a = _word_area(floors["body"], family, 1.35)
+    secondary_a = _word_area(floors["secondary"], family, 1.35)
+    foot_a = _word_area(floors["footnote"], family, 1.3)
+    table_area = 0.0
+    secondary_words = copy["secondary"]
+    if copy.get("table"):
+        cells = sum(_copy_words(c) for r in copy["table"]["rows"] for c in r) + sum(_copy_words(c) for c in copy["table"].get("header") or [])
+        table_area = table_height(copy["table"], area["width"], floors["secondary"], family) * area["width"]  # a table fills its own box
+        secondary_words = max(0, secondary_words - cells)
+    needed = (copy["body"] * body_a + secondary_words * secondary_a + copy["footnote"] * foot_a) / TEXT_FILL + table_area
+    offered = area["area"]
+    ratio = needed / offered if offered else 0.0
+    words = copy["total"]
+    return {"words": words, "capacity": int(round(words / ratio)) if ratio else 0, "ratio": ratio}
+
+
+def plan_capacity(spec: str, lock: str, project: Path | None = None) -> tuple[dict[str, list[str]], list[dict]]:
+    """OVER_CAPACITY and TITLE_FIT findings per record, and a row per record for the plan report (fill ratio, words, capacity)."""
+    _skill_scripts()
+    import text_measure
+    import type_floor
+    floors = type_floor.floors(lock)
+    fonts = type_floor.typography(lock)
+    body_family = fonts.get("body_family") or fonts.get("font_family") or "Segoe UI"
+    found: dict[str, list[str]] = {}
+    report: list[dict] = []
+    for block in re.split(r"\n(?=#### Slide )", spec)[1:]:
+        head = block.splitlines()[0].replace("#### ", "").strip()
+        number = re.match(r"Slide (\d+)", head)
+        number = int(number.group(1)) if number else None
+        layout = type_floor.layout_name(lock, block, number)
+        role = type_floor.record_field(block, "Role")
+        rhythm = next((v for k, v in type_floor.lock_sections(lock).get("page_rhythm", {}).items() if type_floor.page_number(k) == number), "")
+        sparse = bool(type_floor.SPARSE_ROLE.search(f"{role} {rhythm} {layout or ''}")) and rhythm != "dense"
+        issues: list[str] = []
+        title = re.sub(r"[`*]|^[\"“]|[\"”]$", "", type_floor.record_field(block, "Title")).strip()
+        if title:
+            box = type_floor.title_box(project, lock, layout)
+            wrap_width = box["width"] - 19.2  # PowerPoint's default 0.1 in text insets each side
+            lines = text_measure.wrap_real(title, size=box["size"], max_width=wrap_width, family=box["family"], weight=box["weight"])
+            words = _copy_words(title)
+            if len(lines) > 2:
+                issues.append(f"TITLE_FIT: the title needs {len(lines)} lines at the locked {box['size']:g} px in a {box['width']:.0f} px title box "
+                              f"(two at most): cut it to its claim in 15 words or fewer, never shrink it")
+            if words > 15 and not sparse:
+                issues.append(f"TITLE_FIT: the title has {words} words; a consulting action title states its claim in 15 or fewer")
+        row = {"slide": head, "layout": layout or "-", "sparse": sparse, "title_lines": len(lines) if title else 0}
+        if not sparse:
+            copy = planned_copy(block)
+            area = type_floor.body_area(project, lock, layout)
+            fit = record_capacity(copy, area, body_family, floors)
+            row.update(words=fit["words"], capacity=fit["capacity"], ratio=round(fit["ratio"], 2), table=bool(copy["table"]), area=area["source"])
+            if fit["ratio"] > OVER_CAPACITY_RATIO:
+                issues.append(f"OVER_CAPACITY: slide {number:02d} plans ~{fit['words']} words; at the {floors['body']:g}/{floors['secondary']:g} px floors "
+                              f"the body holds ~{fit['capacity']} ({100 * fit['ratio']:.0f}% of the page): cut, split the page, or move detail to notes/appendix"
+                              + ("; a planned table is counted at its wrapped height at the secondary floor" if copy["table"] else ""))
+        report.append(row)
+        if issues:
+            found[head] = issues
+    return found, report
+
+
+def capacity_report(report: list[dict]) -> str:
+    lines = ["# Plan capacity at the type floors", "", "| Slide | Layout | Words | Holds ~ | Fill | Title lines |", "|---|---|---:|---:|---:|---:|"]
+    for row in report:
+        if row.get("sparse"):
+            lines.append(f"| {row['slide']} | {row['layout']} | sparse page | | | {row['title_lines']} |")
+        else:
+            lines.append(f"| {row['slide']} | {row['layout']} | {row['words']} | {row['capacity']} | {100 * row['ratio']:.0f}% | {row['title_lines']} |")
+    return "\n".join(lines) + "\n"
+
+
+def plan_lint(spec: str, target_low: int | None = None, lock: str | None = None, project: Path | None = None,
+              report: list | None = None) -> dict[str, list[str]]:
+    """Check the semantic handoff and reader-facing copy. With the execution lock it also holds each record to the page it will be
+    drawn on (plan_capacity): OVER_CAPACITY at the type floors and TITLE_FIT at the locked title size. Density below capacity is a
+    choice, never a finding; `report` (a list) receives one fill-ratio row per record for the plan report."""
     found: dict[str, list[str]] = {}
     for block in re.split(r"\n(?=#### Slide )", spec)[1:]:
         head = block.splitlines()[0].replace("#### ", "").strip()
@@ -354,6 +530,12 @@ def plan_lint(spec: str, target_low: int | None = None) -> dict[str, list[str]]:
             found[head] = issues
     for head, issues in undefined_terms(spec).items():  # self-containment: what a reader with no context cannot read
         found.setdefault(head, []).extend(issues)
+    if lock is not None:
+        capacity, rows = plan_capacity(spec, lock, project)
+        for head, issues in capacity.items():
+            found.setdefault(head, []).extend(issues)
+        if report is not None:
+            report.extend(rows)
     return found
 
 
@@ -880,8 +1062,11 @@ class Runner:
             raise SystemExit("the planner did not write design_spec.md and spec_lock.md")
         (self.project / "svg_output").mkdir(exist_ok=True)
         for revision in range(3):
-            issues = plan_lint((self.project / "design_spec.md").read_text(encoding="utf-8"))
             lock = (self.project / "spec_lock.md").read_text(encoding="utf-8")
+            fill: list[dict] = []
+            issues = plan_lint((self.project / "design_spec.md").read_text(encoding="utf-8"), lock=lock, project=self.project, report=fill)
+            (self.project / ".review").mkdir(exist_ok=True)
+            (self.project / ".review" / "plan_capacity.md").write_text(capacity_report(fill), encoding="utf-8")
             if not re.search(r"(?m)^## pptx_structure\s*\n- mode: flat\s*$", lock) or re.search(r"(?m)^## (?:pptx_masters|pptx_layouts|page_pptx_layouts|page_layouts)\s*$", lock):
                 issues.setdefault("Deck", []).append("this runner requires pptx_structure.mode: flat and no structured mapping sections; imported template slides are visual references, not complete Slide prototypes")
             validated = self.script("project_manager.py", "validate", str(self.project))
@@ -900,7 +1085,8 @@ class Runner:
             message = ("A blind reader saw only the visible slide words in order and identified missing understanding. Repair the story, "
                        "definitions, evidence, transitions and visual task in the affected records of "
                        f"`{project_rel}/design_spec.md`. Edit the roster if needed; preserve verified facts and the user's page constraints. "
-                       "Do not add filler or pixel coordinates. Then reply `DONE plan <number of pages>`.\n\n" + listing)
+                       "Do not add filler or pixel coordinates. OVER_CAPACITY and TITLE_FIT items are measured at the type floors: cut the copy, split "
+                       "the page or move detail to an appendix page, and shorten titles; never plan smaller type. Then reply `DONE plan <number of pages>`.\n\n" + listing)
             saved = dict(self.authors["frontier"])
             self.authors["frontier"] = {**saved, "effort": self.args.planner_effort}
             try:
@@ -1123,50 +1309,12 @@ class Runner:
         self.say("newcomer read: " + (", ".join(k.split(" - ")[0] for k in found) if found else "PASS"))
         return found
 
-    def page_capacity(self) -> tuple[str, int, int, str]:
-        """How many words a packed body page of THIS deck holds: Meridian's liked density scaled to this deck's body zone (from the
-        base template's content placeholder, else the house zone) and to its body font's width (measured in the browser)."""
-        zone = (54, 146, 1172, 514)
-        font = "Segoe UI"
-        manifest = self.project / "base_template" / "import" / "analysis" / "manifest.json"
-        if manifest.is_file():
-            data = json.loads(manifest.read_text(encoding="utf-8"))
-            font = ((data.get("theme") or {}).get("fonts") or {}).get("minorLatin") or font
-            template_pptx = self.project / "base_template" / "template.pptx"
-            if template_pptx.is_file():  # the fonts the template's slides actually set win over its (often default) theme
-                used = template_styles_used(template_pptx)
-                body = [f for f in used["text_fonts"] if not re.search(r"(?i)consolas|courier|mono", f)]
-                font = body[0] if body else font
-            best = None
-            for layout in data.get("layouts") or []:
-                for holder in layout.get("placeholders") or []:
-                    g = holder.get("geometry") or {}
-                    if holder.get("semanticRole") in ("object", "body", "content") and g.get("width") and g.get("height"):
-                        area = g["width"] * g["height"]
-                        if (layout.get("layoutType") == "obj" or "content" in str(layout.get("displayName", "")).lower()) and (best is None or area > best[0]):
-                            best = (area, (int(g["x"]), int(g["y"]), int(g["width"]), int(g["height"])))
-            if best:
-                zone = best[1]
-        ratio = 1.0
-        try:
-            from playwright.sync_api import sync_playwright
-            with sync_playwright() as playwright:
-                browser = playwright.chromium.launch(channel=os.environ.get("PPT_MASTER_BROWSER_CHANNEL") or None)
-                try:
-                    widths = browser.new_page().evaluate("""(font) => { const c = document.createElement('canvas').getContext('2d');
-                        const s = 'Every reported measure traces to an approved City source, definition and owner in 2023';
-                        const w = f => { c.font = `12px ${f}`; return c.measureText(s).width; };
-                        return [w('"Segoe UI"'), w(`"${font}", "Segoe UI"`)]; }""", font)
-                finally:
-                    browser.close()
-            ratio = widths[0] / widths[1] if widths[1] else 1.0
-        except Exception:  # noqa: BLE001 - without a browser the budget is scaled by area only
-            pass
-        words, ref_w, ref_h = REFERENCE_DENSITY
-        target = int(round(words * (zone[2] * zone[3]) / (ref_w * ref_h) * ratio / 10.0) * 10)
-        text = (f"This deck's body zone is {zone[2]} x {zone[3]} px in {font}; a packed consulting page of this size holds about {target} words "
-                f"of final copy at the lock's body and annotation sizes (measured from a deck the user approved, scaled to this zone and this font's width).")
-        return text, int(target * 0.85), int(target * 1.15), f"x={zone[0]}..{zone[0] + zone[2]}, y={zone[1]}..{zone[1] + zone[3]}"
+    def page_capacity(self) -> tuple[dict[str, list[str]], list[dict]]:
+        """The plan's capacity contract for this project: per record, the planned words against what its layout holds at the type
+        floors, and the title's lines at the locked title size (plan_capacity). Used by the plan gate; callable on its own."""
+        spec = (self.project / "design_spec.md").read_text(encoding="utf-8")
+        lock = (self.project / "spec_lock.md").read_text(encoding="utf-8")
+        return plan_capacity(spec, lock, self.project)
 
     def template(self, pages: list[dict]) -> None:
         """The deck's template: used when provided, otherwise created - before any page, with no approval gate."""

@@ -11,7 +11,7 @@ Measured on our own decks before these rules (pga-par3): body text at a median 1
 | Slide title (24 px and up) | 1.15 - 1.2 |
 | Heading inside the page (15 - 23 px) | 1.2 - 1.3 |
 | Body and table text (11 - 14 px) | 1.4 - 1.5, never under 1.3 |
-| Notes and sources (under 11 px) | about 1.4 |
+| Notes and sources (11 - 13 px; never under 11, §8) | about 1.4 |
 | A big number with its caption | the caption's first baseline sits one caption line below the number's baseline |
 
 ## 2. Paragraph spacing: inside a group is always tighter than between groups
@@ -33,7 +33,7 @@ Equal things get equal gaps: the same gap between every pair of list items, ever
 
 ## 4. When it does not fit
 
-In this order: shorten the wording (the record allows shortening, never dropping); take the type one step down, never under the lock's annotation size for body and footnote size for notes; restructure (two columns, a list instead of prose, a table instead of cards). Never close up the leading, never let text leave its shape.
+In this order: shorten the wording (the record allows shortening, never dropping); take the type one step down, never under the type floor of §8 (and never a title under its layout's size); restructure (two columns, a list instead of prose, a chart instead of a table, fewer columns); move detail to the notes or an appendix page. Never close up the leading, never let text leave its shape, never shrink below the floor to fit.
 
 ## 5. Lists are native lists
 
@@ -59,3 +59,29 @@ A bar without a name is a coloured rectangle: the reader has to count down a lis
 ## 7. Tables are native tables
 
 A grid whose rows and columns both carry meaning - including `label | content` rows - is a PowerPoint table, styled to the deck: header band, row fills, first-column weight, sparse rules, cell padding, all expressed per cell in the table's JSON ([`native-data-interface.md`](./native-data-interface.md) §2, schema `ppt-master.semantic-table.v2`). The text lives in the cells. Draw the visible fallback to the same design, because the fallback is what the preview shows and the JSON is what PowerPoint gets: same rows, same words, same fills, same alignment. Row heights follow §3. The exporter refuses a native table whose JSON and fallback disagree, so: every `<text>` inside the table group must equal, as one string, a cell's text in the JSON - a cell's text that runs over several lines ends each line with a space before the next `<tspan>` (`WHERE THE <tspan x="54" dy="17">TIME GOES</tspan>`), or the lines are that cell's `paragraphs` in the same order; a cell with a heading and a paragraph lists both as `paragraphs`; header cells carry `"align": "l"` (they export centred otherwise); then stamp the page (`stamp_native_fallbacks.py <page>.svg --write`). What is *not* a table: a row of KPI cards, a Gantt, a figure with a legend.
+
+## 8. The type floor: minimums, never targets
+
+Measured on the rendered page (1280 x 720 canvas; 1 pt = 1.333 px), a scaled group counted at its effective size:
+
+| Role | What it is | Floor |
+|---|---|---|
+| Body | running text, list items, the key message, paragraphs in panels | 16 px (12 pt) |
+| Secondary | table cells, diagram and chart labels, callouts, glosses, stage notes, captions, exhibit headers | 14 px (10.5 pt) |
+| Footnote | source lines, footnotes, notes under the exhibit at the foot of the page | 11 px (8 pt) |
+| Furniture | running header, eyebrow, footer, folio, a cover's meta lines | 11 px (8 pt) |
+| Title | the page title | the layout's title size - never shrunk to fit |
+
+A floor is the smallest a reader can take in, not the size to design at: consulting density comes from structure (a grid, a table, a labelled figure), never from type under the floor. Sizes above the floor follow the lock. A project that must differ (a print handout, a larger projected room) declares its floors once in `spec_lock.md`:
+
+```markdown
+## type_floor
+- body: 16
+- secondary: 14
+- footnote: 11
+```
+
+**Never shrink below the floor to fit.** When the words do not fit at the floor: cut the copy to what the page's question needs, move detail to the page's notes or an appendix page, or change the exhibit (fewer columns, a chart instead of a table, a second page). The planner is held to the same contract (OVER_CAPACITY and TITLE_FIT in the plan check), so a record that cannot be set at the floors is sent back before any page is drawn.
+
+`page_lint.py` gives every text a role and reports `MIN_TYPE` as a certain defect when it is under that role's floor; `TITLE_SHRUNK`, `TITLE_LINES` (over two lines) and `TITLE_WIDOW` (a one-word last line) are flagged. The role is read from the markup where it says so - the chrome group, `data-pptx-placeholder`, a native table or chart, an id such as `source`, `caption`, `note`, `label` or `legend` - and otherwise from the geometry: a paragraph wider than 30% of the canvas or a line across half of it is body; a list item is body; a label inside a small shape, a short line or a narrow note is secondary; a small last line at the foot of the page is a footnote. Where the geometry cannot tell, say it on the text or its group with the optional attribute `data-type-role="title|body|secondary|footnote|furniture"`; it is never required, and it cannot lower a floor - it only names the role.
+

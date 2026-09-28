@@ -39,6 +39,8 @@ Prompts for the eye, not prohibitions. A card, three columns, or an accent are f
 | Decoration without meaning | Does this icon, stripe or shape say anything the words do not? | Delete it. |
 | Title repeated in the body | Is the first body line the title again? | Replace it with the proof: the mechanism, the figure, the consequence. |
 | Text that overlaps, clips or crowds | At reading size, does anything touch, overflow its zone, or sit on a line? | Widen the zone, shorten the label, or move it outside the crowded region. This is always fixed, never accepted. |
+| Type under the floor | Is any text smaller than its role allows (body 16 px, labels and cells 14 px, sources 11 px - consulting-typesetting.md §8)? | A blocker, never a polish item: the lint reports it as `MIN_TYPE` (certain). Cut the copy, move detail to notes or an appendix, or change the exhibit; never accept a page that shrank its text to fit. A title set under its layout's size (`TITLE_SHRUNK`) is the same failure. |
+| Empty bands and huddled figures | Is part of the body zone empty - a band across the page, a figure squeezed into a strip, content that stops half way? | A composition issue to judge from the crop the lint attaches (`DEAD_BAND`, `UNDERFILLED`, `HUDDLED`): whitespace that frames one hero element is a choice; a band the figure could have used is dead space - enlarge the figure, raise the type, or move the takeaway into it. |
 
 ## 3. What strong pages do
 
