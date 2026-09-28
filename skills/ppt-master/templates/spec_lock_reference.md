@@ -25,7 +25,7 @@ After Generate Step 4 Gate 1, read the completed Design Spec and current page/re
 | `pptx_structure` | `mode` | `flat`, `structured` |
 | `forbidden` | Literal list items | The technical baseline rows stay untagged; every other row is a prohibition the user stated in their own words (request, chat, `image_notes`), quoted verbatim and ending with `(user)`; nothing else enters — general standards stay in their owning reference, a template's rules stay in its installed spec, and a confirmed `visual_style_behavior` binds as identity prose without becoming a lock row |
 
-Optional data sections: `images`, `page_visualizations` (Chart/Table only). New locks never write legacy `page_charts` (existing locks may keep it read-only); never declare one page in both.
+Optional data sections: `images`, `page_visualizations` (Chart/Table only), `type_floor` (`body`, `secondary`, `footnote` px minimums; omitted = 16 / 14 / 11, see [`consulting-typesetting.md`](../references/consulting-typesetting.md) §8). New locks never write legacy `page_charts` (existing locks may keep it read-only); never declare one page in both.
 
 ```markdown
 ## forbidden

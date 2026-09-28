@@ -155,6 +155,88 @@ def measure_text(
     )
 
 
+_FONT_FILES: dict[tuple[str, bool], tuple[str, int]] | None = None
+_FONT_OBJECTS: dict[tuple[str, int], object] = {}
+
+
+def _font_files() -> dict[tuple[str, bool], tuple[str, int]]:
+    """Installed font files by (lower-case family, bold), built once (about a second on Windows)."""
+    global _FONT_FILES
+    if _FONT_FILES is not None:
+        return _FONT_FILES
+    _FONT_FILES = {}
+    try:
+        from PIL import ImageFont
+    except Exception:  # noqa: BLE001 - without Pillow every measurement falls back to the estimator
+        return _FONT_FILES
+    import os
+    folders = [Path(os.environ.get('WINDIR', r'C:\Windows')) / 'Fonts', Path.home() / 'AppData/Local/Microsoft/Windows/Fonts',
+               Path('/usr/share/fonts'), Path('/Library/Fonts'), Path('/System/Library/Fonts')]
+    for folder in folders:
+        if not folder.is_dir():
+            continue
+        for file in folder.rglob('*'):
+            if file.suffix.lower() not in ('.ttf', '.otf', '.ttc'):
+                continue
+            for face in range(4 if file.suffix.lower() == '.ttc' else 1):
+                try:
+                    family, style = ImageFont.truetype(str(file), 10, index=face).getname()
+                except Exception:  # noqa: BLE001
+                    break
+                style = (style or 'Regular').lower()
+                if 'italic' in style or 'oblique' in style:
+                    continue
+                bold = 'bold' in style and 'semi' not in style
+                _FONT_FILES.setdefault((family.lower(), bold), (str(file), face))
+                _FONT_FILES.setdefault((f'{family} {style}'.lower(), False), (str(file), face))
+    return _FONT_FILES
+
+
+def installed_family(family: str, weight: str = 'normal') -> tuple[str, tuple[str, int]] | None:
+    """The first family of a CSS stack that is installed here, with its font file; None when none is."""
+    bold = str(weight).lower() in ('bold', '600', '700', '800', '900')
+    files = _font_files()
+    for name in (part.strip().strip('"\'') for part in str(family).split(',')):
+        found = files.get((name.lower(), bold)) or files.get((name.lower(), False))
+        if found:
+            return name, found
+    return None
+
+
+def measure_real(text: str, *, size: float, family: str = 'Calibri', weight: str = 'normal') -> float:
+    """Advance width in px from the real metrics of the first installed family of a CSS stack (what PowerPoint lays out
+    with). Falls back to the checker's estimator when no family of the stack is installed."""
+    found = installed_family(family, weight)
+    if found is None:
+        return measure_text(text, size=size, family=family, weight=weight, include_headroom=False)
+    try:
+        from PIL import ImageFont
+        key = found[1]
+        if key not in _FONT_OBJECTS:
+            _FONT_OBJECTS[key] = ImageFont.truetype(key[0], size=64, index=key[1])
+        return _FONT_OBJECTS[key].getlength(text) * size / 64.0
+    except Exception:  # noqa: BLE001
+        return measure_text(text, size=size, family=family, weight=weight, include_headroom=False)
+
+
+def wrap_real(text: str, *, size: float, max_width: float, family: str = 'Calibri', weight: str = 'normal') -> list[str]:
+    """Greedy word wrap with real font metrics: the lines a box of `max_width` px shows."""
+    words = text.split()
+    if not words:
+        return ['']
+    lines: list[str] = []
+    current = words[0]
+    for word in words[1:]:
+        candidate = f'{current} {word}'
+        if measure_real(candidate, size=size, family=family, weight=weight) <= max_width:
+            current = candidate
+        else:
+            lines.append(current)
+            current = word
+    lines.append(current)
+    return lines
+
+
 # Scripts written without spaces between words; everything else that is a
 # letter or digit (Latin, Cyrillic, Greek, Arabic, Hebrew, Devanagari, ...)
 # forms words that only break at spaces.
