@@ -1618,6 +1618,8 @@ class Runner:
         for stem, items in self.consistency_repairs(pages).items():  # F06: measured, so sent whether or not the reviewer repeats them
             wanted.setdefault(stem, []).extend(items)
         changes = re.split(r"\n\s*DECK VERDICT", changes)[0]
+        if getattr(self, "deck_verdicts", {}).get("first") == "PASS":
+            changes = ""  # a passing deck review's change list is polish: only measured findings (F06) go back to the pages
         for item in re.split(r"\n\s*(?=(?:\d+[.)]|[-*•])\s)", changes):  # numbered or bulleted, as the reviewer chose
             item = " ".join(item.split())
             head = re.split(r"\s[—–-]\s|:", re.sub(r"^(?:\d+[.)]|[-*•])\s*", "", item), maxsplit=1)[0]
