@@ -93,3 +93,18 @@ def test_a_requirements_coverage_page_is_flagged():
     recs[-1] = recs[-1].replace("Slide 04", "Slide 04")
     found = story_lint(deck(recs, storyline=[r.split("- **Title**: ")[1].split("\n")[0] for r in recs]))
     assert any("maps the client's requirements back" in i for i in found["Slide 03 - Coverage"])
+
+
+def test_internal_codes_are_flagged_unless_explained_or_a_path():
+    bad = GOOD[:2] + [record(3, "Loop", content="Verdicts: CONCEPT_REPLAN and EXECUTION_REPAIR; USD 42,000 and USD 21,000.")] + GOOD[3:]
+    issue = " ".join(story_lint(deck(bad)).get("Slide 03 - Loop", []))
+    assert "CONCEPT_REPLAN" in issue and "EXECUTION_REPAIR" in issue
+    ok = GOOD[:2] + [record(3, "Loop", content="EXECUTION_REPAIR (fix the drawing); files land in svg_output/ and spec_lock.md; USD 42,000 and USD 21,000.")] + GOOD[3:]
+    assert "internal codes" not in " ".join(story_lint(deck(ok)).get("Slide 03 - Loop", []))
+
+
+def test_frontier_heavy_plans_are_flagged():
+    body = [record(i, f"P{i}", exhibit="text-argument - claim", title="Option B halves setup cost for the same coverage").replace(
+        "- **Role**: body", "- **Role**: body\n- **Author tier**: frontier") for i in range(2, 8)]
+    recs = [GOOD[0]] + body + [GOOD[3].replace("Slide 04", "Slide 08")]
+    assert any("marked frontier" in i for i in story_lint(deck(recs)).get("Deck", []))

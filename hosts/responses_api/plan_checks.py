@@ -42,6 +42,8 @@ EXHIBITS = {
 FURNITURE = {"cover", "section-divider", "closing"}
 TABULAR = {"table", "comparison-table"}
 TITLE_MAX_WORDS = 15
+# internal codes: UPPER_SNAKE or snake_case identifiers (verdict codes, field names) that a reader cannot decode
+CODE = re.compile(r"\b(?:[A-Z][A-Z0-9]+_[A-Z0-9_]+|[a-z]+_[a-z0-9_]+)\b")
 # a page that maps the client's requirements back to them (the user's standing rule: needs are answered through the story)
 ECHO = re.compile(r"(?i)\b(?:(?:RFP|request|brief|tender|scope)\W+(?:\w+\W+){0,6}?(?:requirements?|objectives?|scope items?|deliverables?)\b.{0,80}\b(?:owning|owned|mapped|covered|addressed|answered)\b"
                   r"|requirements?\s+(?:coverage|compliance|traceability)|compliance\s+matrix|(?:RFP|request)\s+(?:section|§)\s*\d)")
@@ -138,6 +140,7 @@ def story_lint(spec: str) -> dict[str, list[str]]:
             "one-line plain definition; every page uses exactly these names")
 
     exhibits: list[tuple[str, str]] = []
+    tiers: list[tuple[str, bool, str]] = []
     record_titles: list[str] = []
     missing_figures: dict[str, list[str]] = {}
     for head, block in records:
@@ -164,6 +167,13 @@ def story_lint(spec: str) -> dict[str, list[str]]:
         if ECHO.search(" ".join(_field(block, n) for n in ("Title", "Core message", "Exhibit", "Visual task"))):
             issues.append("the page maps the client's requirements back to them (a coverage or compliance view): keep that check as your "
                           "working and answer the needs through the story, design and diagrams instead")
+        plain = re.sub(r"\S+\.(?:md|py|json|svg|pptx|png)\b", " ", copy)  # file names are what a user types, not codes
+        codes = sorted({m.group(0) for m in CODE.finditer(plain)
+                        if not re.match(r"\s*(?:/|\\|\(|=|:\s*[a-z]|\s[-–—]\s)", plain[m.end():m.end() + 4])})  # a folder, or a code explained in place
+        if codes:
+            issues.append("internal codes a reader cannot read in visible copy (" + ", ".join(codes[:6]) + "): say what each means in plain words "
+                          "(e.g. `EXECUTION_REPAIR` -> `fix the drawing`)")
+        tiers.append((head, furniture, _field(block, "Author tier").strip().lower()))
         if has_register:
             for m in FIGURE.finditer(copy):
                 token = m.group(0)
@@ -207,6 +217,13 @@ def story_lint(spec: str) -> dict[str, list[str]]:
             found.setdefault(head, []).append(
                 f"third body page in a row drawn as `{exhibit}`: vary the exhibit to the claim (a chart for a comparison, a flow for a sequence, "
                 "an annotated example for proof) or merge the pages")
+    body_tiers = [t for _, furniture, t in tiers if not furniture]
+    frontier = sum(1 for t in body_tiers if t.startswith("frontier"))
+    if len(body_tiers) >= 4 and frontier > max(2, (len(body_tiers) + 1) // 2):
+        found.setdefault("Deck", []).append(
+            f"{frontier} of {len(body_tiers)} body pages are marked frontier: keep frontier for pages whose figure needs complex visual judgement "
+            "(architecture, loop, hub-and-spoke, timeline, matrix, multi-series chart) and mark summaries, text arguments, tables, key figures, "
+            "teams and single-series charts workhorse")
     tables = sum(1 for _, e in body if e in TABULAR)
     if len(body) >= 5 and tables / len(body) > 0.4:
         found.setdefault("Deck", []).append(
