@@ -117,6 +117,24 @@ def _table_text_run(
     )
 
 
+def _table_empty_paragraph_end(
+    text: str,
+    *,
+    font_size: int | None,
+    bold: bool | None,
+    language: str | None,
+) -> str:
+    """fork (F03C2): an empty cell keeps its own size. PowerPoint lays out an
+    empty paragraph at its `a:endParaRPr` size and ignores the empty run's, so
+    without one the line takes the master's other-text size (18 pt in the
+    exporter's own master): a 28 px row with an empty 9 pt cell grew to 42 px."""
+    if text or font_size is None:
+        return ""
+    language_attr = f' lang="{_xml_escape(language)}"' if language else ""
+    bold_attr = f' b="{_bool_attr(bold)}"' if bold is not None else ""
+    return f'<a:endParaRPr{language_attr} sz="{font_size}"{bold_attr}/>'
+
+
 def _table_paragraph_properties(
     align: str,
     *,
@@ -1964,7 +1982,9 @@ def _build_native_table(elem: ET.Element, ctx: ConvertContext, payload: dict[str
                     theme_color_spec=ctx.theme_color_spec,
                 )
                 paragraphs_xml = (
-                    f"<a:p>{paragraph_props}{text_run_xml}</a:p>"
+                    f"<a:p>{paragraph_props}{text_run_xml}"
+                    f"{_table_empty_paragraph_end(text, font_size=cell_font_size, bold=bold, language=language or ctx.primary_language)}"
+                    "</a:p>"
                 )
             else:
                 paragraph_parts: list[str] = []
@@ -2022,7 +2042,9 @@ def _build_native_table(elem: ET.Element, ctx: ConvertContext, payload: dict[str
                             for run in paragraph.runs
                         )
                     paragraph_parts.append(
-                        f"<a:p>{paragraph_props}{text_run_xml}</a:p>"
+                        f"<a:p>{paragraph_props}{text_run_xml}"
+                        f"{_table_empty_paragraph_end(paragraph_text, font_size=cell_font_size, bold=bold, language=language or ctx.primary_language)}"
+                        "</a:p>"
                     )
                 paragraphs_xml = "".join(paragraph_parts)
             anchor_keys = {"valign"}

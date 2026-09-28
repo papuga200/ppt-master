@@ -1249,9 +1249,16 @@ def native_parity_issues(svg: Path) -> list[dict]:
         findings = _native_object_projection_findings([svg])
     except Exception:  # noqa: BLE001 - the exporter still checks at the end; never block a render on the checker itself
         return []
+    from native_parity import table_wrap_findings
     return [{"kind": "NATIVE", "severity": "blocker", "hard": True, "rect": [0, 0, 0, 0],
              "message": f"{marker}: {finding}"[:500] + (" - " + NATIVE_PARITY_HINT if number == 0 else "")}
-            for number, (_, marker, finding) in enumerate(findings)]
+            for number, (_, marker, finding) in enumerate(findings)] + [_wrap_finding(item) for item in table_wrap_findings(svg)]
+
+
+def _wrap_finding(item: dict) -> dict:
+    """A native_table_wrap prediction (NATIVE_WORD_SPLIT certain, NATIVE_WRAP_DRIFT / NATIVE_ROW_GROWTH flagged or a note) as a finding."""
+    return {**item, "kind": str(item.get("kind")), "severity": item.get("severity") or "blocker", "hard": bool(item.get("hard")),
+            "rect": list(item.get("rect") or [0, 0, 0, 0]), "message": str(item.get("message") or "")[:900]}
 
 
 def start_contract(svg: Path) -> dict:
@@ -1281,9 +1288,11 @@ def _native_findings(native) -> list[dict]:
     except Exception:  # noqa: BLE001 - the exporter still checks at the end; never block a render on the checker itself
         native.kill()
         return []
+    wrap = [_wrap_finding(item) for item in items if isinstance(item, dict) and item.get("kind")]
+    items = [item for item in items if not (isinstance(item, dict) and item.get("kind"))]
     return [{"kind": "NATIVE", "severity": "blocker", "hard": True, "rect": [0, 0, 0, 0],
              "message": f"{item.get('marker')}: {item.get('finding')}"[:500] + (" - " + NATIVE_PARITY_HINT if number == 0 else "")}
-            for number, item in enumerate(items)]
+            for number, item in enumerate(items)] + wrap
 
 
 def finish_contract(handle: dict) -> list[dict]:
