@@ -2548,6 +2548,21 @@ def _extract_text_bullet(
     return (stripped or runs), bullet
 
 
+def _is_wrapped_separator(
+    line_runs: list[dict[str, Any]],
+    earlier_bullets: list[dict[str, Any] | None],
+) -> bool:
+    """fork (F03): a middle dot that opens a wrapped line of one text block,
+    after a line that is not a list item, is the separator of the line above
+    ("Value 25% · equity 25%" / "· cost 15%"), not a bullet: PowerPoint keeps
+    the literal character the SVG shows."""
+    if not earlier_bullets or earlier_bullets[-1] is not None:
+        return False
+    full_text = ''.join(str(run.get('text', '')) for run in line_runs)
+    match = _TEXT_BULLET_RE.match(full_text)
+    return bool(match and match.group('marker') == '·')
+
+
 def _bullet_margin_px(bullet: dict[str, Any], font_size: float) -> float:
     try:
         return float(bullet.get('margin_px', 0.0))
@@ -3300,6 +3315,10 @@ def convert_text(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | None:
             stripped_paragraphs: list[list[dict[str, Any]]] = []
             for line_runs in paragraph_runs:
                 stripped_runs, bullet = _extract_text_bullet(line_runs)
+                if bullet and _is_wrapped_separator(line_runs, paragraph_bullets):
+                    # fork (F03): a wrapped line that opens with the '·' the
+                    # line above uses as a separator is not a list item
+                    stripped_runs, bullet = line_runs, None
                 stripped_paragraphs.append(
                     _coalesce_text_runs(stripped_runs, fonts, ctx)
                 )

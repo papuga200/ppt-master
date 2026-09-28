@@ -525,6 +525,8 @@ class Runner:
         self.checker_repairs: dict[str, int] = {}  # checker repair rounds spent per page (page-level and deck-level share the budget)
         self.text_in_shapes = ""
         self.native_refused = ""
+        self.parity: dict | None = None  # F03: PowerPoint's own layout of the last export (pptx_parity.py)
+        self.parity_rounds: list[dict] = []
         if str(SCRIPTS) not in sys.path:
             sys.path.insert(0, str(SCRIPTS))
 
@@ -1334,6 +1336,7 @@ class Runner:
             self.text_in_shapes = (merged.stdout.strip().splitlines() or [merged.stderr.strip()[-300:]])[0]
             self.say("text in shapes: " + self.text_in_shapes)
         self.script("pptx_render.py", str(decks[-1]), "--project", str(self.project))
+        self.parity = self.powerpoint_parity(decks[-1])  # F03: what PowerPoint itself draws, measured against the SVG pages
         if outstanding:
             lines = [f"# Outstanding checker issues at export - {decks[-1].name}", "",
                      f"The repair budget ({self.args.repair_rounds} round(s)) was spent with these blocking checker items still open. The deck was exported "
@@ -1346,6 +1349,64 @@ class Runner:
             self.say(f"slide-to-source map: {mapped} page(s) -> {decks[-1].with_suffix('.sources.md').name}")
         self.say(f"exported {decks[-1].relative_to(ROOT)}" + (f" WITH {sum(len(v) for v in outstanding.values())} OUTSTANDING CHECKER ISSUE(S) on {', '.join(outstanding)}" if outstanding else ""))
         return decks[-1]
+
+    # --- F03: PowerPoint parity (begin) ---------------------------------------------------------------
+    def powerpoint_parity(self, deck: Path) -> dict | None:
+        """Measure the exported deck in PowerPoint (pptx_parity.py): overflow, collisions, table row growth, stray bullets, renumbered
+        lists and alignment drift that the browser render cannot show. Writes <deck>.parity.json/.md and records it in quality-run.json."""
+        result = self.script("pptx_parity.py", str(deck), "--project", str(self.project))
+        report_path = deck.with_suffix(".parity.json")
+        if result.returncode != 0 or not report_path.is_file():
+            self.say("PowerPoint parity: not measured - " + ((result.stdout + result.stderr).strip().splitlines() or ["no output"])[-1][:300])
+            return None
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        summary = report["summary"]
+        self.say(f"PowerPoint parity: {summary['certain']} certain, {summary['flagged']} flagged; certain on slide(s) "
+                 + (", ".join(str(n) for n in summary["slides_with_certain"]) or "none") + f" ({report_path.name})")
+        return report
+
+    def parity_repair(self, pages: list[dict], deck: Path) -> Path:
+        """ONE bounded round: every page with certain PowerPoint findings an author can fix gets them back in its own session (repair() and
+        settle(), no new model route); then the checker, one re-export, render and parity measurement. What remains is listed beside the deck."""
+        from pptx_parity import repair_briefs
+        report = self.parity or {}
+        briefs = repair_briefs(report)
+        by_stem = {p["stem"]: p for p in pages}
+        wanted = {stem: text for stem, text in briefs.items() if stem in by_stem and stem in self.page_sessions}
+        record = {"round": 1, "at": time.strftime("%Y-%m-%dT%H:%M:%S"), "before": (report.get("summary") or {}).get("certain", 0),
+                  "pages": sorted(wanted), "not_sent": sorted(set(briefs) - set(wanted))}
+        if not wanted:
+            self.say("PowerPoint parity repair: nothing a page author can fix"
+                     + (f" (no author session for {', '.join(record['not_sent'])})" if record["not_sent"] else ""))
+            self.parity_rounds.append({**record, "after": record["before"]})
+            return deck
+        items = {stem: [line for line in text.splitlines() if line[:1].isdigit()] for stem, text in wanted.items()}
+        self.say("PowerPoint parity repair (one round): " + ", ".join(f"{stem} {len(found)}" for stem, found in items.items()))
+        self.fan_out([lambda s=stem: self.repair(by_stem[s], items[s], wanted[s]) for stem in wanted])
+        blocking = self.checker()
+        self.outstanding = dict(blocking)
+        again = self.export(dict(blocking) or None)
+        residual = [f for f in ((self.parity or {}).get("findings") or []) if f["severity"] == "certain"] if again else []
+        record["after"] = len(residual) if again else None
+        self.parity_rounds.append(record)
+        from page_review import update_journal
+
+        def keep(journal: dict) -> None:
+            journal.setdefault("parity_repair", []).append({**record, "deck": str(again or deck)})
+        update_journal(self.project, keep)
+        if again is None:
+            self.say("PowerPoint parity repair: the re-export failed - the deck exported before the repair stands")
+            return deck
+        if residual:
+            outstanding = again.with_suffix(".outstanding.md")
+            lines = ([outstanding.read_text(encoding="utf-8").rstrip(), ""] if outstanding.is_file() else []) + [
+                f"# PowerPoint parity - still open after one repair round ({again.name})", "",
+                "Measured in PowerPoint after the pages' authors had one round to fix them; look at these in the PowerPoint render first.", ""]
+            lines += [f"- slide {f['slide']} (`{f.get('svg')}`) {f['code']} `{f['shape']}` at {f['bbox']}: {f['message']}" for f in residual]
+            outstanding.write_text(chr(10).join(lines) + chr(10), encoding="utf-8")
+        self.say(f"PowerPoint parity after the repair round: {len(residual)} certain finding(s) left (was {record['before']})")
+        return again
+    # --- F03: PowerPoint parity (end) -----------------------------------------------------------------
 
     def summary(self, pages: list[dict], started: float, deck: Path | None) -> str:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -1370,6 +1431,16 @@ class Runner:
         review_cost = sum((r.get("usage") or {}).get("cost") or 0.0 for r in reviews)
         review_models = sorted({r.get("model") for r in reviews if r.get("model")})
         lint_lines = [f"- `{stem}`: {text}" for stem, items in self.lint_open.items() for text in items]
+        parity_lines: list[str] = []
+        if self.parity is not None:  # F03
+            measured = self.parity["summary"]
+            parity_lines = [f"{measured['certain']} certain and {measured['flagged']} flagged finding(s) measured in PowerPoint on the shipped deck "
+                            f"(`{Path(self.parity['pptx']).with_suffix('.parity.md').name}`)."
+                            + "".join(f" Repair round {r['round']}: {r['before']} -> {r['after']} certain, sent to {', '.join(r['pages']) or 'no page'}."
+                                      for r in self.parity_rounds), ""]
+            parity_lines += [f"- slide {f['slide']} `{f.get('svg')}` {f['code']}: {f['message'][:300]}" for f in self.parity["findings"] if f["severity"] == "certain"]
+        elif deck:
+            parity_lines = ["Not measured: PowerPoint was not available, so the deck is unverified in PowerPoint."]
         lines = [f"# Deck run `{self.args.session}` - {self.project.name}", "",
                  f"Wall time {(time.time() - started) / 60:.1f} min; {len(pages)} pages, {accepted} accepted; {total_calls} author calls; "
                  f"{total_in / 1e6:.1f}M input tokens, {total_out / 1e3:.0f}k output; author cost ${total_cost:.2f}; {len(reviews)} reviewer calls by {', '.join(review_models) or 'none'}"
@@ -1378,6 +1449,7 @@ class Runner:
                  + (f" **Exported with {sum(len(v) for v in self.outstanding.values())} checker issue(s) outstanding on {', '.join(self.outstanding)}** - see the `.outstanding.md` beside the deck." if deck and self.outstanding else ""), "",
                  "| page | tier | author | calls | wall | peak context | cost | outcome |", "|---|---|---|---|---|---|---|---|", *rows, "",
                  *(["## Editable structure", "", self.text_in_shapes, ""] if self.text_in_shapes else []),
+                 *(["## PowerPoint parity (the exported deck, measured in PowerPoint)", "", *parity_lines, ""] if parity_lines else []),
                  "## Geometry lint on the pages as shipped", "", *(lint_lines or ["Nothing open: every finding was fixed, or ruled acceptable by the reviewer that passed the page."]), ""]
         text = "\n".join(lines)
         (self.sessions / f"{self.args.session}.summary.md").write_text(text, encoding="utf-8")
@@ -1452,6 +1524,8 @@ class Runner:
             else:  # the repair budget is spent: the deck ships, with what is still open written beside it
                 deck = self.export(outstanding or None)
             self.outstanding = outstanding
+            if deck is not None and self.parity and self.parity["summary"]["certain"] and not getattr(self.args, "no_parity_repair", False):
+                deck = self.parity_repair(pages, deck)  # F03: one bounded round on what PowerPoint itself draws
         self.lint_open = self.final_lint(pages)
         text = self.summary(pages, started, deck)
         print("\n" + text)
@@ -1484,6 +1558,8 @@ def main() -> int:
     parser.add_argument("--floating-text", action="store_true", help="keep the exporter's floating text boxes: skip the pass that moves text inside its shapes")
     parser.add_argument("--strict-export", action="store_true", help="refuse to export while the final checker reports blocking issues")
     parser.add_argument("--skip-export", action="store_true")
+    parser.add_argument("--no-parity-repair", action="store_true",
+                        help="measure the exported deck in PowerPoint (pptx_parity.py) but do not send its certain findings back to the pages' authors")
     args = parser.parse_args()
     return Runner(args).revise() if args.revise else Runner(args).run()
 

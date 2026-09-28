@@ -99,7 +99,13 @@ After Step 7.3 exports:
 python3 ${SKILL_DIR}/scripts/pptx_render.py <project_path>/exports/<file>.pptx --project <project_path>
 ```
 
-Look at the contact sheet, then at each full-size slide image it lists. Compare with the SVG renders for missing assets, changed wrapping, font substitution, clipping and moved geometry. Repair a difference in the page SVG (never in the PPTX), render that page, rerun the final checker, export again and re-inspect the changed slides. Exit 3 means no renderer is available: report the deck as visually checked in SVG but unverified in PowerPoint.
+Then measure the deck in PowerPoint itself:
+
+```bash
+python3 ${SKILL_DIR}/scripts/pptx_parity.py <project_path>/exports/<file>.pptx --project <project_path>
+```
+
+It reports what PowerPoint lays out differently from the SVG (text set lower or wider running out of its box or into a neighbour, table rows that grow, words broken mid-word, stray or accidental bullets, renumbered lists, numeric columns that lost their alignment), each with a crop of the PowerPoint render. Fix every certain finding in the page SVG. Look at the contact sheet, then at each full-size slide image it lists. Compare with the SVG renders for missing assets, changed wrapping, font substitution, clipping and moved geometry. Repair a difference in the page SVG (never in the PPTX), render that page, rerun the final checker, export again and re-inspect the changed slides. Exit 3 means no renderer is available: report the deck as visually checked in SVG but unverified in PowerPoint.
 
 ## 6. Finish
 

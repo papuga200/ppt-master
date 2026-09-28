@@ -507,11 +507,55 @@ def number_lists(body) -> int:
                         holder.append(child)
                 auto = etree.SubElement(ppr, q("a:buAutoNum"))
                 auto.set("type", "arabicPeriod" if found.group(2) == "." else "arabicParenR")
-                if item is run_of[0][0] and number != 1:
-                    auto.set("startAt", str(number))
+                if run_of[0][1] != 1:
+                    # every item carries the list's start: PowerPoint counts a paragraph on from the one above only when their
+                    # numbering is identical, so a start set on the first item alone restarts the second at 1 (kirkland2 s12: 1, 2, 1)
+                    auto.set("startAt", str(run_of[0][1]))
                 made += 1
         run_of = [(para, int(match.group(1)), match)] if match else []
     return made
+
+
+ZERO_WIDTH = "\u200b\u200c\u200d\u2060\ufeff"
+BULLET_KINDS = ("buNone", "buAutoNum", "buChar", "buBlip")
+BULLET_LOOK = ("buClrTx", "buClr", "buSzTx", "buSzPct", "buSzPts", "buFontTx", "buFont")
+PPR_ORDER = ("lnSpc", "spcBef", "spcAft", *BULLET_LOOK, *BULLET_KINDS, "tabLst", "defRPr", "extLst")
+
+
+def no_bullet(para) -> bool:
+    """Set `buNone` on a paragraph (dropping any bullet it had) in schema order. True when something changed."""
+    ppr = para.find("a:pPr", NS)
+    if ppr is None:
+        ppr = etree.Element(q("a:pPr"))
+        para.insert(0, ppr)
+    if ppr.find("a:buNone", NS) is not None and not any(ppr.find(f"a:{k}", NS) is not None for k in BULLET_KINDS[1:]):
+        return False
+    for child in list(ppr):
+        if etree.QName(child).localname in BULLET_KINDS + BULLET_LOOK:
+            ppr.remove(child)
+    node = etree.Element(q("a:buNone"))
+    later = [i for i, child in enumerate(ppr) if etree.QName(child).localname in PPR_ORDER[PPR_ORDER.index("buNone") + 1:]]
+    ppr.insert(later[0] if later else len(ppr), node)
+    return True
+
+
+def clear_stray_bullets(tree, stats: dict) -> None:
+    """No bullet where the SVG shows none (F03). An empty placeholder the exporter keeps as a carrier holds a zero-width character and
+    inherits its layout's bullet, so PowerPoint drew a dot on the slide (selfdoc 28 Sep P02, P08, P14, P19; on P14 it sat on a '1.').
+    Every paragraph of a placeholder without a bullet of its own, and every paragraph without visible text, gets `buNone`."""
+    for shape in tree.iter(q("p:sp")):
+        body = shape.find("p:txBody", NS)
+        if body is None:
+            continue
+        placeholder = shape.find("p:nvSpPr/p:nvPr/p:ph", NS) is not None
+        for para in body.findall("a:p", NS):
+            text = "".join(t.text or "" for t in para.iter(q("a:t")))
+            empty = not re.sub(rf"[\s{ZERO_WIDTH}]", "", text)
+            ppr = para.find("a:pPr", NS)
+            own = ppr is not None and any(ppr.find(f"a:{k}", NS) is not None for k in BULLET_KINDS)
+            if (empty and (placeholder or own)) or (placeholder and not own):
+                if no_bullet(para):
+                    stats["bullets_cleared"] = stats.get("bullets_cleared", 0) + 1
 
 
 def overlap(a, b, shrink=0.0):
@@ -858,8 +902,10 @@ def process_slide(xml: bytes, slide_size, ratio: float, fonts=None, rels: dict |
     tree = root.find("p:cSld/p:spTree", NS)
     if tree is None:
         return xml, stats
+    clear_stray_bullets(tree, stats)
     items = walk(tree)
-    texts = [TextBox(i, ratio, fonts) for i in items if i.is_text and "".join(i.el.itertext()).strip()]
+    # a carrier holding only a zero-width character is not text a reader sees: it is neither adopted nor stacked (F03, selfdoc P14)
+    texts = [TextBox(i, ratio, fonts) for i in items if i.is_text and re.sub(rf"[\s{ZERO_WIDTH}]", "", "".join(i.el.itertext()))]
     stats["texts"] = len(texts)
 
     def leave(reason: str, count: int = 1) -> None:
@@ -867,7 +913,7 @@ def process_slide(xml: bytes, slide_size, ratio: float, fonts=None, rels: dict |
 
     if root.find("p:timing", NS) is not None:
         leave("slide has animation timing", len(texts))
-        return xml, stats
+        return etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True), stats
     slide_area = slide_size[0] * slide_size[1]
     texts = join_lines(texts, items, stats)
     hosts = [(i, host_kind(i, slide_area)) for i in items]
@@ -1122,7 +1168,8 @@ def convert(source: Path, target: Path, chrome: bool = True) -> dict:
             out.writestr(infos.get(name, name), data)
     scratch.replace(target)
     totals = {k: sum(s.get(k, 0) for s in report["slides"].values())
-              for k in ("texts", "adopted", "hosts", "stacked", "stacks", "reflowed", "single", "joined", "paragraphs", "numbered", "titles", "rules", "named", "described", "glued")}
+              for k in ("texts", "adopted", "hosts", "stacked", "stacks", "reflowed", "single", "joined", "paragraphs", "numbered", "titles", "rules", "named", "described", "glued",
+                        "bullets_cleared")}
     notes: dict[str, int] = {}
     for stats in report["slides"].values():
         for reason, count in (stats.get("notes") or {}).items():
@@ -1184,7 +1231,8 @@ def main() -> int:
     print(f"{target.name}: {totals['texts']} text boxes -> {totals['hosts'] + totals['stacks'] + totals['single']} text objects: {totals['joined']} one-line texts joined into "
           f"{totals['paragraphs']} paragraphs ({totals['reflowed']} paragraphs now wrap), {totals['adopted']} texts inside {totals['hosts']} shapes, {totals['stacked']} in "
           f"{totals['stacks']} heading-and-body blocks, {totals['titles']} real slide titles, {totals['numbered']} numbered-list items; {totals['single']} single boxes; {totals['named']} objects named after their text, "
-          f"{totals['rules']} hairlines made real lines, {totals['glued']} straight arrows glued to their boxes as connectors, {totals['described']} pictures given alt text")
+          f"{totals['rules']} hairlines made real lines, {totals['glued']} straight arrows glued to their boxes as connectors, {totals['described']} pictures given alt text"
+          + (f", {totals['bullets_cleared']} paragraphs kept free of an inherited or empty bullet" if totals.get("bullets_cleared") else ""))
     moved = totals.get("chrome") or {}
     if moved.get("objects"):
         print(f"  header and footer: {moved['objects']} repeated objects moved from {moved['slides']} slides to one layout"
