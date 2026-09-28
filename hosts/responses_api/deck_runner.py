@@ -1573,6 +1573,11 @@ class Runner:
             raise SystemExit("no `#### Slide NN - name` blocks found in §IX")
         (self.project / "svg_output").mkdir(exist_ok=True)
         import page_review
+        if self.args.revision_budget is not None:  # a finite design-revision allowance per page, fixed before any page is authored
+            with page_review.journal_lock(self.project):
+                journal = page_review.load_journal(self.project)
+                journal["revision_budget"] = self.args.revision_budget
+                page_review.save_journal(self.project, journal)
         page_review._ensure_server(self.project)  # once, before any page renders
         calibration = self.script("text_measure.py", "calibrate", str(self.project), "--outline").stdout
         all_pages = parse_pages(spec_path.read_text(encoding="utf-8"))
@@ -1663,6 +1668,7 @@ def main() -> int:
     parser.add_argument("--no-anchor", action="store_true", help="no chrome anchor: every page starts at once")
     parser.add_argument("--anchor-own-tier", action="store_true", help="author the anchor with its own tier instead of the frontier author")
     parser.add_argument("--no-escalate", action="store_true")
+    parser.add_argument("--revision-budget", type=int, default=None, help="design revisions a page may spend after its first draft (default: the journal's, 3)")
     parser.add_argument("--repair-rounds", type=int, default=2, help="checker repair rounds; when spent, the deck is exported anyway with the open items listed beside it")
     parser.add_argument("--exemplar", help="project whose design_spec.md and spec_lock.md show the planner the FORMAT (default: the PGA case)")
     parser.add_argument("--planner-effort", default="high", help="reasoning effort of the planner (the judgement-heavy stage)")
