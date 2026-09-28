@@ -161,7 +161,7 @@ Measured across 150 pages by ten models; each one has cost authors revisions or 
 - NATIVE TABLES. The render's lint runs the exporter's own table check (`NATIVE` findings): inside a `data-pptx-replace-with="table"` group every wrapped cell line ends with a space before the next `<tspan>` (or the lines are the cell's `paragraphs`), punctuation is identical in the drawing and the JSON, and any colour, weight, size or alignment you give a drawn cell is set on that cell in the JSON. Use only the schema's fields.
 - NEVER SILENCE THE LINT. Do not widen `data-pptx-bounds` past the body zone or margins, and do not wrap modules in a new group to make a finding disappear: fix the geometry.
 - TOOLS. Copy file paths exactly from your job (character for character - a hyphen is not an underscore). Never batch two edits that touch the same passage, and never send an edit whose old and new text are equal. Do not read your own file back after writing it: the render shows it. Leave `timeout_s` unset.
-- STOP AT PASS. When the review says PASS, record `accepted` at once; its "highest-impact change" is then optional and not worth a revision.
+- STOP AT PASS. When the review says PASS - or lists 0 blockers and only suggests polish - record `accepted` at once; its "highest-impact change" is then optional and not worth a revision.
 - NEVER STOP EARLY. A failing tool call (a reference not in the library, a script error) is not a reason to stop: work around it and draw the page. `DONE <stem> unresolved` is only for a page that has been drawn, rendered and reviewed and whose revision budget is spent.
 - A record's field names (`Wave 1`, `Layer`, `Zone`) are not visible labels unless the `Content` gives them as text.
 - READ WITHOUT A PRESENTER. The page is read by someone with no context and nobody to ask. Keep every definition and expansion the record gives; never abbreviate a name, invent shorthand, drop a unit or leave a code (like `W23`) without the explanation the record gives it.
@@ -1160,7 +1160,10 @@ class Runner:
                   if f["severity"] == "certain"]
         return lines
 
-    def deck_review(self, pages: list[dict]) -> None:
+    def deck_review(self, pages: list[dict], verify: bool = False) -> None:
+        """The whole-deck look: the transcribed words, the contact sheet for rhythm, and every page at full size (thumbnails alone
+        made reviewers misread 9-10 pt text). With verify=True it is the one check after deck repair: written beside the first
+        review, never sent back to the pages."""
         import page_review
         sheet = self.script("page_review.py", "contact-sheet", str(self.project))
         image = self.project / ".preview" / "contact_sheet.png"
@@ -1185,6 +1188,19 @@ class Runner:
                         "can follow the deck without oral explanation; otherwise `DECK VERDICT: CHANGES`.")
         content = [{"type": "input_text", "text": "VISIBLE WORDS TRANSCRIBED FROM THE DRAWN SLIDES, IN ORDER:\n\n" + "\n\n".join(drawn_words)},
                    {"type": "input_text", "text": "CONTACT SHEET (roster order, left to right, top to bottom):"}, *page_review._image_item(image)]
+        instructions += (" Every page is also attached at full size after the contact sheet: judge legibility, collisions, clipped text and "
+                         "diagram meaning (arrows with a direction and a target, loops that show where they return, labels attached to what they "
+                         "name, callouts keyed to the figure) on those, never on the thumbnails.")
+        for page in pages:
+            render = self.project / ".preview" / f"{page['stem']}.png"
+            if render.is_file():
+                content.append({"type": "input_text", "text": f"P{page['number']:02d} at full size:"})
+                content.extend(page_review._image_item(render))
+        first = self.project / ".review" / "deck_review.md"
+        if verify and first.is_file():
+            instructions += (" This is the check after one round of repairs: the earlier review's change list is attached. Say for each item "
+                             "whether it is now fixed, and list only material problems that remain or were introduced by the repair.")
+            content.append({"type": "input_text", "text": "THE EARLIER DECK REVIEW (before the repair round):\n\n" + first.read_text(encoding="utf-8")[:12000]})
         if self.consistency_before:  # F06: the deterministic cross-page findings, for the reviewer to confirm or reject from the pages
             import deck_consistency
             instructions += (" A script has also compared the pages' drawn text (figures and their labels, names, chrome, markers); its "
@@ -1207,15 +1223,18 @@ class Runner:
         finally:
             for k, v in saved.items():
                 os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
-        self.model_call("deck_review", reviewer, review_started, usage, "ok")
-        out = self.project / ".review" / "deck_review.md"
+        self.model_call("deck_review_verify" if verify else "deck_review", reviewer, review_started, usage, "ok")
+        out = self.project / ".review" / ("deck_review_verify.md" if verify else "deck_review.md")
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(f"# Deck review - independent, over the contact sheet\n\n{time.strftime('%Y-%m-%d %H:%M:%S')}\n\n{text.strip()}\n", encoding="utf-8")
+        heading = "Deck review after the repair round" if verify else "Deck review - independent, over the contact sheet and every page at full size"
+        out.write_text(f"# {heading}\n\n{time.strftime('%Y-%m-%d %H:%M:%S')}\n\n{text.strip()}\n", encoding="utf-8")
         page_review.update_journal(self.project, lambda journal: journal.setdefault("deck_review", []).append(
             {"model": reviewer["model"], "seconds": round(time.time() - review_started, 1), "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
              "usage": {k: usage.get(k) for k in ("input_tokens", "cached_tokens", "output_tokens", "reasoning_tokens", "cost", "cost_source", "backend", "attempts")}}))
         verdict = re.search(r"DECK VERDICT\W{0,6}(PASS|CHANGES)", text, re.I)
-        self.say(f"deck review: {verdict.group(1).upper() if verdict else 'unparsed'} -> {out.relative_to(ROOT)}")
+        self.deck_verdicts = getattr(self, "deck_verdicts", {})
+        self.deck_verdicts["verify" if verify else "first"] = verdict.group(1).upper() if verdict else "unparsed"
+        self.say(f"deck review{' after repair' if verify else ''}: {verdict.group(1).upper() if verdict else 'unparsed'} -> {out.relative_to(ROOT)}")
 
     def stage_host(self, name: str, task: str, tier: str = "frontier", effort: str | None = None) -> int:
         """One planning-side conversation (planner, template) on the frontier author, with the deck's documents as its system prompt."""
@@ -1588,7 +1607,7 @@ class Runner:
             return ""
         return chr(10) + "## The deck's template (templates/template.md) - every page follows it" + chr(10) * 2 + rules.read_text(encoding="utf-8") + chr(10)
 
-    def deck_repair(self, pages: list[dict]) -> None:
+    def deck_repair(self, pages: list[dict]) -> bool:
         """The deck review's findings go back to the authors of the pages they name - one round, in the pages' own sessions -
         together with the certain findings of the deterministic cross-page check (F06), each addressed to its page(s)."""
         review = self.project / ".review" / "deck_review.md"
@@ -1612,7 +1631,7 @@ class Runner:
                     wanted.setdefault(by_number[number]["stem"], []).append(item[:900])
         if not wanted:
             self.say("deck repair: nothing addressed to a page")
-            return
+            return False
         self.say("deck repair: " + ", ".join(f"{k} {len(v)}" for k, v in wanted.items()))
         hint = ("These findings come from a blind reader of the whole drawn deck. Repair the visual explanation, direct labels, legibility, "
                 "missing on-slide definition or cross-page consistency as the finding specifies. Preserve sourced facts and the page's "
@@ -1622,6 +1641,7 @@ class Runner:
                    "scope when two figures are both right; change only your page." if self.consistency_before else ""))
         by_stem = {p["stem"]: p for p in pages}
         self.fan_out([lambda s=stem, i=items: self.repair(by_stem[s], i, hint, stage="deck_repair") for stem, items in wanted.items()])
+        return True
 
     def write_source_map(self, deck: Path) -> int:
         """`<deck>.sources.md`: each slide, its title and the sources its record names - what a later update starts from."""
@@ -1920,9 +1940,12 @@ class Runner:
                 self.deck_review(all_pages)
             if not self.args.no_deck_repair:
                 with self.stage("deck_repair"):
-                    self.deck_repair(pages)
+                    repaired = self.deck_repair(pages)
                     blocking = self.checker()
                     self.consistency_after = self.consistency("after deck repair")  # F06: what the one repair round left
+                if repaired:
+                    with self.stage("deck_review_verify"):
+                        self.deck_review(all_pages, verify=True)  # F10: one look after the repair round; reported, never repaired again
             outstanding = dict(blocking)  # deck-level (_project) items block the exporter too, so they ship through the override and are listed
             if outstanding and self.args.strict_export:
                 self.say("export skipped (--strict-export): the final checker still reports blocking issues on " + ", ".join(outstanding))

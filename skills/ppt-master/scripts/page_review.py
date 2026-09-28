@@ -597,9 +597,12 @@ def cmd_note(args: argparse.Namespace) -> int:
     if args.outcome == "accepted" and not getattr(args, "no_review", False):
         if review.get("sha") != digest:
             raise SystemExit("no independent review of this revision: run `review` on the current render before recording `accepted`")
-        if review.get("verdict") != "PASS":
+        polish_only = review.get("verdict") == "EXECUTION_REPAIR" and (review.get("blockers") or 0) == 0
+        if review.get("verdict") != "PASS" and not polish_only:
             raise SystemExit(f"the independent review of this revision returned {review.get('verdict')} with {review.get('blockers')} blocker(s) "
                              f"({review.get('file')}): fix them, render, and review again - or record `unresolved` with the issue named")
+        if polish_only:  # a review that names no defect only suggests polish: accepting it does not spend another revision
+            text += "\n[accepted with the reviewer's polish notes: 0 blockers]"
     elif args.outcome == "accepted":
         text += "\n[accepted without an independent review of this revision]"
     notes_dir = project / ".review" / "notes"
