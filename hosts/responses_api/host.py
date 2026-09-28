@@ -47,9 +47,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 PY = Path(sys.executable)
-for _stream in (sys.stdout, sys.stderr):  # console codepages (GBK, cp1252) cannot print every tool result
-    if hasattr(_stream, "reconfigure"):
-        _stream.reconfigure(encoding="utf-8", errors="replace")
 SCRIPTS = ROOT / "skills" / "ppt-master" / "scripts"
 ENV_FILE = Path(os.environ["PPT_MASTER_ENV_FILE"]) if os.environ.get("PPT_MASTER_ENV_FILE") else None
 OUT = Path(os.environ.get("PPT_MASTER_SESSIONS_DIR") or (ROOT / ".host-sessions")).resolve()
@@ -87,7 +84,7 @@ def _env_for_scripts() -> dict[str, str]:
         env["OPENAI_API_KEY"] = _key("OPENAI_API_KEY")
     except SystemExit:
         pass
-    if os.environ.get("PPT_MASTER_REVIEW_KEY_VAR"):  # a reviewer from another family than the author (deck_runner sets it per tier)
+    if os.environ.get("PPT_MASTER_REVIEW_KEY_VAR") and not os.environ.get("PPT_MASTER_REVIEW_API_BASE", "").strip().lower().startswith("cli:"):  # a reviewer from another family than the author (deck_runner sets it per tier)
         try:
             env[os.environ["PPT_MASTER_REVIEW_KEY_VAR"]] = _key(os.environ["PPT_MASTER_REVIEW_KEY_VAR"])
         except SystemExit:
@@ -198,6 +195,25 @@ def tool_run_script(script: str, args: list[str] | None = None, timeout_s: int =
 
 PENDING_IMAGES: list[tuple[str, bytes]] = []
 DELIVERED: list[str] = []
+_IMAGE_SINK: list[tuple[str, bytes]] | None = None  # set by capture_images(): a caller that returns images with the tool result itself
+
+
+def _queue_image(path: str, data: bytes) -> None:
+    (PENDING_IMAGES if _IMAGE_SINK is None else _IMAGE_SINK).append((path, data))
+
+
+class capture_images:
+    """`with capture_images() as images: HANDLERS[name](**args)` - the images this one call produced, instead of the shared queue
+    the Responses loop sends with its next message (the MCP tool server returns them inside the tool result)."""
+
+    def __enter__(self) -> list[tuple[str, bytes]]:
+        global _IMAGE_SINK
+        self._previous, _IMAGE_SINK = _IMAGE_SINK, []
+        return _IMAGE_SINK
+
+    def __exit__(self, *exc) -> None:
+        global _IMAGE_SINK
+        _IMAGE_SINK = self._previous
 
 
 def _image_allowed(target: Path) -> bool:
@@ -212,7 +228,7 @@ def _attach_printed_images(stdout: str) -> None:
             continue
         target = Path(line[len("IMAGE: "):].strip()).resolve()
         if target.is_file() and _image_allowed(target) and target.stat().st_size <= 6_000_000:
-            PENDING_IMAGES.append((str(target), target.read_bytes()))
+            _queue_image(str(target), target.read_bytes())
             DELIVERED.append(str(target))
 
 
@@ -223,7 +239,7 @@ def tool_read_image(path: str) -> str:
     data = target.read_bytes()
     if len(data) > 4_000_000:
         raise ValueError("image larger than 4 MB; read a smaller rendering")
-    PENDING_IMAGES.append((str(target.relative_to(ROOT)), data))
+    _queue_image(str(target.relative_to(ROOT)), data)
     return f"image {target.relative_to(ROOT)} ({len(data)} bytes) is attached to the next message"
 
 
@@ -283,17 +299,17 @@ def _call(payload: dict, transcript: Path) -> dict:
 SYSTEM_FILE = Path(os.environ["PPT_MASTER_SYSTEM_FILE"]) if os.environ.get("PPT_MASTER_SYSTEM_FILE") else None
 
 
-def system_prompt() -> str:
-    if SYSTEM_FILE:  # a page author (deck_runner.py): its whole brief, identical across the deck's pages so the prefix caches
-        text = SYSTEM_FILE.read_text(encoding="utf-8")
-    else:
-        text = (ROOT / "AGENTS.md").read_text(encoding="utf-8") + "\n\n" + (ROOT / "skills" / "ppt-master" / "SKILL.md").read_text(encoding="utf-8")
-    return text + (
+TOOLS_NOTE = ("Tools: read_file (text files or directory listings, relative to the repository root), read_image (see an image), write_file, edit_file (exact replacement of one unique passage - use it for local SVG revisions), list_dir, "
+              "run_script (the skill's own scripts by path under skills/ppt-master/scripts, with arguments; paths in arguments are relative to the repository root). ")
+IMAGES_NOTE = "Whenever a script prints an `IMAGE: <path>` line, this host attaches that image to the tool result: you see it with the next message and need not call read_image for it. "
+
+
+def host_notes(tools_note: str = TOOLS_NOTE, images_note: str = IMAGES_NOTE) -> str:
+    """The harness paragraph appended to every system prompt. A CLI host (cli_host.py) swaps the tool and image sentences."""
+    return (
         "\n\n# Host notes\n"
         f"You are running inside a tool harness. SKILL_DIR is {ROOT / 'skills' / 'ppt-master'} and the repository root is {ROOT}. "
-        "Tools: read_file (text files or directory listings, relative to the repository root), read_image (see an image), write_file, edit_file (exact replacement of one unique passage - use it for local SVG revisions), list_dir, "
-        "run_script (the skill's own scripts by path under skills/ppt-master/scripts, with arguments; paths in arguments are relative to the repository root). "
-        "Whenever a script prints an `IMAGE: <path>` line, this host attaches that image to the tool result: you see it with the next message and need not call read_image for it. "
+        + tools_note + images_note +
         "The scripts' Python is the checkout's own; do not cd, install anything, or run other programs. Image generation: run_script image_gen.py with the OpenAI backend "
         "(IMAGE_BACKEND=openai, model gpt-image-2, already configured). The user is present in this chat but not at a browser: use the chat confirmation surface for every "
         "blocking gate. At a blocking gate, stop calling tools and write the gate's content and its question as your reply; the user's answer arrives as the next message. "
@@ -301,16 +317,27 @@ def system_prompt() -> str:
     )
 
 
-def _write_run_blocks(session: str, usage_total: dict) -> None:
+def system_prompt(notes: str | None = None) -> str:
+    if SYSTEM_FILE:  # a page author (deck_runner.py): its whole brief, identical across the deck's pages so the prefix caches
+        text = SYSTEM_FILE.read_text(encoding="utf-8")
+    else:
+        text = (ROOT / "AGENTS.md").read_text(encoding="utf-8") + "\n\n" + (ROOT / "skills" / "ppt-master" / "SKILL.md").read_text(encoding="utf-8")
+    return text + (host_notes() if notes is None else notes)
+
+
+def _write_run_blocks(session: str, usage_total: dict, host: str = "responses_api", model: str | None = None, effort: str | None = None,
+                      images: int | None = None, started: float | None = None) -> None:
     """Model, effort and spend belong in the journal of every project this session touched."""
+    model, effort = model or MODEL, effort or EFFORT
+    delivered = len(DELIVERED) if images is None else images
     for journal_path in (ROOT / "projects").glob("*/quality-run.json"):
-        if journal_path.stat().st_mtime < SESSION_STARTED:
+        if journal_path.stat().st_mtime < (started or SESSION_STARTED):
             continue
         def stamp(journal: dict, session=session) -> None:
             runs = journal.setdefault("run", {})
             earlier = (runs.get(session) or {}).get("images_delivered", 0)
-            runs[session] = {"host": "responses_api", "model": MODEL, "effort": EFFORT, "usage": usage_total,
-                             "images_delivered": earlier + len(DELIVERED)}
+            runs[session] = {"host": host, "model": model, "effort": effort, "usage": usage_total,
+                             "images_delivered": earlier + delivered}
 
         if str(SCRIPTS) not in sys.path:
             sys.path.insert(0, str(SCRIPTS))
@@ -318,7 +345,22 @@ def _write_run_blocks(session: str, usage_total: dict) -> None:
         update_journal(journal_path.parent, stamp)
 
 
+def backend_label() -> str:
+    return "anthropic-messages" if "anthropic.com" in API_BASE else "http-responses"
+
+
+def identity() -> dict:
+    """Who runs this session, written into state.json so a later run (deck_runner.sessions_of) can tell the tier and model apart."""
+    found = {"model": MODEL, "effort": EFFORT, "backend": backend_label(), "api_base": API_BASE}
+    if os.environ.get("PPT_MASTER_TIER"):
+        found["tier"] = os.environ["PPT_MASTER_TIER"]
+    return found
+
+
 def main() -> int:
+    for stream in (sys.stdout, sys.stderr):  # console codepages (GBK, cp1252) cannot print every tool result
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser()
     parser.add_argument("--session", required=True, help="name under this directory for state and transcript")
     parser.add_argument("--task", help="the first user message (starts a new session)")
@@ -333,6 +375,7 @@ def main() -> int:
     state_path = session_dir / "state.json"
     transcript = session_dir / "transcript.jsonl"
     state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.is_file() else {}
+    state.update(identity())
     if args.task_file:
         args.task = Path(args.task_file).read_text(encoding="utf-8")
     if args.task:
