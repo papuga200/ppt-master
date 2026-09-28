@@ -56,6 +56,10 @@ RESUME_NOTE = ("The previous run of this conversation stopped at its call ceilin
 # no bundled skills in an author's context; a long MCP tool call (a render under load, a nested review) is waited for.
 CLAUDE_ENV = {"CLAUDE_CODE_DISABLE_CLAUDE_MDS": "1", "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1", "CLAUDE_CODE_DISABLE_BUNDLED_SKILLS": "1",
               "MCP_TOOL_TIMEOUT": "86400000", "MCP_TIMEOUT": "120000"}
+# --max-turns means model turns, as in host.py (one response may batch several tool calls). Codex's stream counts tool calls,
+# so its watchdog allows this many per turn: at 1:1 a 40-turn page session was stopped mid-page before its first review
+# (campaign test T4, 29 Sep 2026: 40 tool calls in about 15 responses).
+CODEX_TOOL_CALLS_PER_TURN = 3
 STOP_GRACE_S = 30  # after the call ceiling: time the CLI gets to shut down cleanly before its process tree is ended (not a model deadline)
 
 
@@ -434,7 +438,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         argv = codex_argv(model, effort, system_file, session_dir, env, resume=resume)
         on_event = session.on_codex
-        ceiling = lambda: session.tool_calls >= args.max_turns  # noqa: E731
+        ceiling = lambda: session.tool_calls >= args.max_turns * CODEX_TOOL_CALLS_PER_TURN  # noqa: E731
     state["pending_input"] = []
     state_path.write_text(json.dumps(state, indent=1), encoding="utf-8")
     (session_dir / "cli_argv.json").write_text(json.dumps(argv, indent=1), encoding="utf-8")
@@ -479,7 +483,7 @@ def main(argv: list[str] | None = None) -> int:
                   "rollout": rollout, "wall_s": round(time.time() - started, 1), "tool_calls": session.tool_calls, "images_delivered": session.images}})
     if at_ceiling:  # --resume-pending continues the same CLI conversation
         state["pending_input"] = [{"cli_continue": True, "at": time.time()}]
-        print(f"call ceiling reached ({args.max_turns}): the conversation is kept; continue with --resume-pending", flush=True)
+        print(f"call ceiling reached ({args.max_turns} turns): the conversation is kept; continue with --resume-pending", flush=True)
     state_path.write_text(json.dumps(state, indent=1), encoding="utf-8")
     if text and not failed:
         (session_dir / "last_message.md").write_text(text, encoding="utf-8")
