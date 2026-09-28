@@ -749,6 +749,8 @@ class Runner:
         self.telemetry_path = self.sessions / f"{args.session}.runner.jsonl"
         self.parity: dict | None = None  # F03: PowerPoint's own layout of the last export (pptx_parity.py)
         self.parity_rounds: list[dict] = []
+        self.consistency_before: dict = {}  # F06: deck_consistency.py before the deck review, and again after deck repair
+        self.consistency_after: dict = {}
         if str(SCRIPTS) not in sys.path:
             sys.path.insert(0, str(SCRIPTS))
         self.preflight_subscriptions()
@@ -1109,6 +1111,55 @@ class Runner:
                 "you have a fresh revision budget. The independent reviewer's last report on it:\n\n" + remaining + "\n")
         self.author(page, "frontier", anchor, suffix=".frontier", note=note)
 
+    # --- F06: deterministic cross-page consistency --------------------------------------------------
+    # deck_consistency.py reads the drawn text of every page (figures with their labels, names, chrome, markers). It runs after the
+    # deck checker and before the deck review; the review is asked to confirm its findings, deck repair sends each certain finding to
+    # the page(s) it names, and one more run after deck repair records what is left in the summary and beside the exported deck.
+    def consistency(self, stage: str) -> dict:
+        """Run the cross-page check on svg_output; write .review/consistency.md (before review) or consistency_after_repair.md."""
+        import deck_consistency
+        try:
+            report = deck_consistency.check(self.project, self.project / "design_spec.md")
+        except Exception as exc:  # noqa: BLE001 - an advisory check never stops the run
+            self.say(f"consistency check unavailable ({stage}): {type(exc).__name__}: {exc}")
+            return {}
+        name = "consistency" if stage == "before review" else "consistency_after_repair"
+        out = self.project / ".review"
+        out.mkdir(parents=True, exist_ok=True)
+        (out / f"{name}.md").write_text(deck_consistency.render_markdown(report, f"{self.project.name}, {stage}"), encoding="utf-8")
+        (out / f"{name}.json").write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+        self.say(f"consistency ({stage}): {report['certain']} certain, {report['flagged']} flagged "
+                 + (f"({', '.join(f'{k} {v}' for k, v in report['counts'].items())}) " if report["counts"] else "")
+                 + f"-> {(out / f'{name}.md').relative_to(ROOT) if out.is_relative_to(ROOT) else out / f'{name}.md'}")
+        return report
+
+    def consistency_repairs(self, pages: list[dict]) -> dict[str, list[str]]:
+        """The certain findings as page-addressed repair items: {stem: [text]} for pages that have an author session."""
+        import deck_consistency
+        if not self.consistency_before:
+            return {}
+        stems = {p["number"]: p["stem"] for p in self.consistency_before.get("pages") or []}
+        known = {p["stem"] for p in pages}
+        wanted: dict[str, list[str]] = {}
+        for number, items in deck_consistency.repair_items(self.consistency_before).items():
+            stem = stems.get(number)
+            if stem in known and stem in self.page_sessions:
+                wanted.setdefault(stem, []).extend(items)
+        return wanted
+
+    def consistency_lines(self) -> list[str]:
+        """Summary and outstanding-list lines: what the check found before review, and what is still open after deck repair."""
+        if not self.consistency_before:
+            return []
+        before, after = self.consistency_before, self.consistency_after or {}
+        lines = [f"Before the deck review: {before['certain']} certain, {before['flagged']} flagged "
+                 f"(`.review/consistency.md`)." + (f" After deck repair: {after['certain']} certain, {after['flagged']} flagged "
+                                                  f"(`.review/consistency_after_repair.md`)." if after else " Not re-run (no deck repair).")]
+        residual = (after or before).get("findings") or []
+        lines += [f"- {f['severity'].upper()} {f['kind']} ({', '.join(f'P{p:02d}' for p in f['pages'])}): {f['message']}" for f in residual
+                  if f["severity"] == "certain"]
+        return lines
+
     def deck_review(self, pages: list[dict]) -> None:
         import page_review
         sheet = self.script("page_review.py", "contact-sheet", str(self.project))
@@ -1134,6 +1185,12 @@ class Runner:
                         "can follow the deck without oral explanation; otherwise `DECK VERDICT: CHANGES`.")
         content = [{"type": "input_text", "text": "VISIBLE WORDS TRANSCRIBED FROM THE DRAWN SLIDES, IN ORDER:\n\n" + "\n\n".join(drawn_words)},
                    {"type": "input_text", "text": "CONTACT SHEET (roster order, left to right, top to bottom):"}, *page_review._image_item(image)]
+        if self.consistency_before:  # F06: the deterministic cross-page findings, for the reviewer to confirm or reject from the pages
+            import deck_consistency
+            instructions += (" A script has also compared the pages' drawn text (figures and their labels, names, chrome, markers); its "
+                             "findings are listed. Confirm each one you can see in the transcript and put it in the change list with its page "
+                             "numbers; say which you reject and why. Do not report a figure or word that the transcript does not contain.")
+            content.insert(1, {"type": "input_text", "text": deck_consistency.prompt_block(self.consistency_before)})
         reviewer = self.reviewers["frontier"]  # the whole deck on one sheet is the hardest look of the run
         payload = {"model": reviewer["model"], "instructions": instructions, "store": False, "input": [{"role": "user", "content": content}]}
         if reviewer.get("effort"):
@@ -1532,14 +1589,15 @@ class Runner:
         return chr(10) + "## The deck's template (templates/template.md) - every page follows it" + chr(10) * 2 + rules.read_text(encoding="utf-8") + chr(10)
 
     def deck_repair(self, pages: list[dict]) -> None:
-        """The deck review's findings go back to the authors of the pages they name - one round, in the pages' own sessions."""
+        """The deck review's findings go back to the authors of the pages they name - one round, in the pages' own sessions -
+        together with the certain findings of the deterministic cross-page check (F06), each addressed to its page(s)."""
         review = self.project / ".review" / "deck_review.md"
-        if not review.is_file():
-            return
-        text = review.read_text(encoding="utf-8")
+        text = review.read_text(encoding="utf-8") if review.is_file() else ""
         changes = text[text.lower().rfind("prioritised change"):] if "prioritised change" in text.lower() else text
         by_number = {p["number"]: p for p in pages}
         wanted: dict[str, list[str]] = {}
+        for stem, items in self.consistency_repairs(pages).items():  # F06: measured, so sent whether or not the reviewer repeats them
+            wanted.setdefault(stem, []).extend(items)
         changes = re.split(r"\n\s*DECK VERDICT", changes)[0]
         for item in re.split(r"\n\s*(?=(?:\d+[.)]|[-*•])\s)", changes):  # numbered or bulleted, as the reviewer chose
             item = " ".join(item.split())
@@ -1558,7 +1616,10 @@ class Runner:
         self.say("deck repair: " + ", ".join(f"{k} {len(v)}" for k, v in wanted.items()))
         hint = ("These findings come from a blind reader of the whole drawn deck. Repair the visual explanation, direct labels, legibility, "
                 "missing on-slide definition or cross-page consistency as the finding specifies. Preserve sourced facts and the page's "
-                "audience question. If the record itself prevents the repair, say so in your note rather than silently ignoring the issue.")
+                "audience question. If the record itself prevents the repair, say so in your note rather than silently ignoring the issue."
+                + (" Items tagged [Cnn FIGURE_CONFLICT|FORMAT_DRIFT|TERM_DRIFT|CHROME_DRIFT|MARKER_DRIFT] were measured by a script over "
+                   "every page's drawn text: for a figure, use the value the plan and sources give (design_spec.md, sources/) and state its "
+                   "scope when two figures are both right; change only your page." if self.consistency_before else ""))
         by_stem = {p["stem"]: p for p in pages}
         self.fan_out([lambda s=stem, i=items: self.repair(by_stem[s], i, hint, stage="deck_repair") for stem, items in wanted.items()])
 
@@ -1766,6 +1827,7 @@ class Runner:
                  "| page | tier | author | calls | wall | peak context | cost | outcome |", "|---|---|---|---|---|---|---|---|", *rows, "",
                  *(["## Editable structure", "", self.text_in_shapes, ""] if self.text_in_shapes else []),
                  *(["## PowerPoint parity (the exported deck, measured in PowerPoint)", "", *parity_lines, ""] if parity_lines else []),
+                 *(["## Cross-page consistency", "", *self.consistency_lines(), ""] if self.consistency_lines() else []),
                  "## Geometry lint on the pages as shipped", "", *(lint_lines or ["Nothing open: every finding was fixed, or ruled acceptable by the reviewer that passed the page."]), ""]
         text = "\n".join(lines)
         (self.sessions / f"{self.args.session}.summary.md").write_text(text, encoding="utf-8")
@@ -1852,6 +1914,7 @@ class Runner:
             checker_info["outcome"] = f"{sum(len(v) for v in blocking.values())} blocking" if blocking else "clean"
 
         deck = None
+        self.consistency_before = self.consistency("before review")  # F06: after the deck checker, before the deck review
         if not self.args.skip_export:
             with self.stage("deck_review"):
                 self.deck_review(all_pages)
@@ -1859,6 +1922,7 @@ class Runner:
                 with self.stage("deck_repair"):
                     self.deck_repair(pages)
                     blocking = self.checker()
+                    self.consistency_after = self.consistency("after deck repair")  # F06: what the one repair round left
             outstanding = dict(blocking)  # deck-level (_project) items block the exporter too, so they ship through the override and are listed
             if outstanding and self.args.strict_export:
                 self.say("export skipped (--strict-export): the final checker still reports blocking issues on " + ", ".join(outstanding))
@@ -1870,6 +1934,12 @@ class Runner:
             if deck is not None and self.parity and self.parity["summary"]["certain"] and not getattr(self.args, "no_parity_repair", False):
                 with self.stage("parity_repair"):
                     deck = self.parity_repair(pages, deck)  # F03: one bounded round on what PowerPoint itself draws
+            residual = (self.consistency_after or self.consistency_before).get("findings") if self.consistency_before else None
+            if deck is not None and residual:  # F06: residual cross-page findings go beside the deck too
+                note = deck.with_suffix(".outstanding.md")
+                head = note.read_text(encoding="utf-8") if note.is_file() else f"# Outstanding items at export - {deck.name}\n"
+                note.write_text(head.rstrip() + "\n\n## Cross-page consistency (deck_consistency.py)\n\n" + "\n".join(self.consistency_lines()) + "\n",
+                                encoding="utf-8")
         with self.stage("final_lint"):
             self.lint_open = self.final_lint(pages)
         text = self.summary(pages, started, deck)

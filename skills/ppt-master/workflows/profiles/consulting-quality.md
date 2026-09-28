@@ -78,8 +78,11 @@ An edit after a page's outcome was recorded invalidates that look (`page_review.
 After the final quality gate passes and before Step 7:
 
 ```bash
+python3 ${SKILL_DIR}/scripts/deck_consistency.py <project_path>
 python3 ${SKILL_DIR}/scripts/page_review.py contact-sheet <project_path>
 ```
+
+`deck_consistency.py` compares the pages' drawn text and writes `.review/consistency.md`: one figure with two values on two pages and a missing or out-of-sequence chrome element are CERTAIN (fix them); a value written two ways, a name spelled two ways, chrome styled differently and one label keyed by different marker colours are FLAGGED (confirm each on the pages). A `## Glossary` section in `design_spec.md` (`- Term: definition` lines) makes its terms the canonical spelling. Run it again after the edits below.
 
 Look at the contact sheet and read the titles in order, open full-size renders of the dense and critical pages, and apply [`consulting-review.md`](../../references/consulting-review.md) §4. Write the prioritised change list to `<project_path>/.review/deck_review.md`. Apply changes to the affected pages only (each through §3's render-and-look, within its remaining budget); a plan-level change edits the owning §IX entry first, a change to a recurring decision is made once at its owner and every affected page is rendered again. Rerun the final checker once after the edits, then look at the contact sheet once more to verify. One review plus one verification is the normal amount.
 
