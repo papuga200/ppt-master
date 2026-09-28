@@ -65,7 +65,7 @@ from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent
 NEVER_WAIVABLE = {"TEXT_ON_TEXT", "OFF_CANVAS", "CONTRACT", "MIN_TYPE"}
-HARD = {"TEXT_ON_TEXT", "OFF_CANVAS", "CONTRACT", "TEXT_INVISIBLE", "MIN_TYPE"}
+HARD = {"TEXT_ON_TEXT", "OFF_CANVAS", "CONTRACT", "TEXT_INVISIBLE", "MIN_TYPE", "NATIVE_CHART_OVERLAP"}
 CROPPED_HARD = {"MIN_TYPE"}  # certain, but the author and the reviewer still see where
 FILL_KINDS = {"DEAD_BAND", "UNDERFILLED", "HUDDLED"}
 
@@ -469,6 +469,32 @@ def analyse(geometry: dict, png_bytes: bytes | None = None, content_area=None, i
     # ORPHAN_LABEL, LOOP_WITHOUT_HEAD, CONNECTOR_NO_TARGET, UNKEYED_CALLOUT, BOUNDARY_CROSSING (diagram-clarity.md, Diagram contract)
     for finding in diagram_findings(geometry, texts, shapes, width, height, structural, findings):
         add(finding["kind"], "blocker", finding["rect"], finding["message"], finding.get("waiver"))
+
+    # NATIVE_CHART_OVERLAP (certain): text drawn outside a native chart's group but over its frame. PowerPoint redraws the chart's
+    # axes, tick and data labels inside the frame itself, so such text doubles them or collides with them (qualification Q3, Q4).
+    for chart in (page or {}).get("charts") or []:
+        fx0, fy0, fx1, fy1 = chart["rect"]
+        for t in texts:
+            if chart["id"] and chart["id"] in (t.get("groups") or []):
+                words = _chart_key(t.get("text") or "")
+                owned = chart.get("owned") or set()
+                # the exporter maps a drawn text to the chart when it is one of the payload's strings (category, series, title,
+                # caption, source, note) or a number (tick or data label); anything else stays a free text at its drawn place
+                if words and words not in owned and not re.fullmatch(r"[\s$€£%.,:·x0-9/+~-]*", t.get("text") or "") \
+                        and not any(words in o or o in words for o in owned if len(o) > 3):
+                    x0, y0, x1, y1 = _box(t)
+                    add("NATIVE_CHART_EXTRA_TEXT", "blocker", [x0, y0, x1, y1],
+                        f'"{(t.get("text") or "")[:50]}" sits inside the native chart `{chart["id"]}` but is not one of its categories, data labels, '
+                        "axis labels or legend: PowerPoint lays out its own labels and this text stays where it was drawn, so they can collide. "
+                        "Put it outside the chart frame, or make it the chart's caption, note or source companion text")
+                continue
+            x0, y0, x1, y1 = _box(t)
+            if min(x1, fx1) - max(x0, fx0) > 2 and min(y1, fy1) - max(y0, fy0) > 2:
+                add("NATIVE_CHART_OVERLAP", "blocker", [x0, y0, x1, y1],
+                    f'"{(t.get("text") or "")[:50]}" is drawn over the native chart `{chart["id"]}` (frame x={fx0:.0f}-{fx1:.0f}, y={fy0:.0f}-{fy1:.0f}) '
+                    "but outside its group: PowerPoint redraws the chart's axes, tick labels and data labels itself, so this text will "
+                    "double them or collide. Move axis, tick and data labels inside the chart group (native-data-interface.md), or place "
+                    "annotations outside the frame")
 
     # UNUSED canvas (from the pixels): the quadrant and right-edge notes; the empty foot is DEAD_BAND's when the page context is known
     if png_bytes and not is_cover and not (page is not None and page.get("sparse")):
@@ -1447,7 +1473,48 @@ def page_context(project: Path | None, stem: str, geometry: dict | None = None) 
     if str(SCRIPTS) not in sys.path:
         sys.path.insert(0, str(SCRIPTS))
     import type_floor
-    return type_floor.page_context(project, stem, (geometry or {}).get("pageRole"))
+    context = type_floor.page_context(project, stem, (geometry or {}).get("pageRole"))
+    context["charts"] = native_chart_frames(Path(project) / "svg_output" / f"{stem}.svg") if project else []
+    return context
+
+
+def _chart_key(text: str) -> str:
+    """Lower-case letters and digits only: how a drawn label is matched with the chart payload's strings."""
+    return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
+
+
+def native_chart_frames(svg: Path) -> list[dict]:
+    """The frames of the page's native charts (`data-pptx-replace-with="chart"`, x/y/width/height from their JSON metadata):
+    PowerPoint redraws everything inside such a frame - axes, tick labels, gridlines, legend, data labels."""
+    import xml.etree.ElementTree as ET
+    frames: list[dict] = []
+    try:
+        root = ET.parse(svg).getroot()
+    except (ET.ParseError, OSError):
+        return frames
+    for group in root.iter():
+        if group.get("data-pptx-replace-with") != "chart":
+            continue
+        meta = next((c for c in group if c.tag.split("}")[-1] == "metadata"), None)
+        try:
+            data = json.loads("".join(meta.itertext())) if meta is not None else {}
+            x, y, w, h = (float(data[k]) for k in ("x", "y", "width", "height"))
+        except (ValueError, KeyError, TypeError):
+            continue
+        owned: set = set()
+        def collect(value):
+            if isinstance(value, str):
+                owned.add(_chart_key(value))
+            elif isinstance(value, dict):
+                for v in value.values():
+                    collect(v)
+            elif isinstance(value, list):
+                for v in value:
+                    collect(v)
+        collect(data)
+        owned.discard("")
+        frames.append({"id": group.get("id") or "", "rect": [x, y, x + w, y + h], "owned": owned})
+    return frames
 
 
 MEASURED_PAGE: list = [None]  # the open browser page of the file measure() last yielded

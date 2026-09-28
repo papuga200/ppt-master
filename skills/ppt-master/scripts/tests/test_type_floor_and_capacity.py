@@ -323,3 +323,23 @@ def test_template_owned_chrome_text_is_a_note_not_a_blocker():
     assert kinds == ["TEMPLATE_TYPE"]
     finding = page_lint.type_findings([authored], {}, 1280, 720)[0]
     assert finding["kind"] == "MIN_TYPE" and finding["hard"]
+
+
+def test_text_over_a_native_chart_frame_is_certain_and_payload_labels_are_owned(tmp_path):
+    import json as _json
+    svg = tmp_path / "svg_output" / "p.svg"
+    svg.parent.mkdir()
+    meta = {"x": 100, "y": 100, "width": 400, "height": 200, "type": "bar", "categories": ["Alpha", "Beta"],
+            "series": [{"name": "Hours", "values": [3, 5]}]}
+    svg.write_text('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720"><g id="c" data-pptx-replace-with="chart">'
+                   f'<metadata>{_json.dumps(meta)}</metadata></g></svg>', encoding="utf-8")
+    frames = page_lint.native_chart_frames(svg)
+    assert frames[0]["rect"] == [100.0, 100.0, 500.0, 300.0] and "alpha" in frames[0]["owned"]
+    page = dict(PAGE, charts=frames)
+    outside = text("10/10", 80, 150, size=16, width=40)
+    inside_owned = dict(text("Alpha", 120, 150, size=16, width=60), groups=["c"])
+    inside_free = dict(text("a note nobody mapped", 120, 200, size=16, width=160), groups=["c"])
+    kinds_found = [(f["kind"], f.get("hard")) for f in run([title(), footer(), outside, inside_owned, inside_free], page=page)
+                   if f["kind"].startswith("NATIVE_CHART")]
+    assert ("NATIVE_CHART_OVERLAP", True) in kinds_found
+    assert ("NATIVE_CHART_EXTRA_TEXT", False) in kinds_found and len(kinds_found) == 2
