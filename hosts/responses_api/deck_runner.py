@@ -32,23 +32,33 @@ What it does.
    the PPTX, and a summary: per page tier, model, calls, time, cost, outcome.
 
 Nothing here decides design: the page loop, the reviewer gate and the contract are the skill's own.
+
+Routes. An author or reviewer entry whose `api_base` is `cli:claude` or `cli:codex` runs on the user's subscription through the
+Claude Code CLI or the Codex CLI (cli_host.py for sessions, subscription_cli.py for single-shot reviews; examples in
+route_profiles/). The runner checks each CLI's login before any stage and refuses the run when it is not the subscription. Every
+stage and model call is also written to `<sessions>/<session>.runner.jsonl` (UTC timestamps, usage, cost and its cost_source),
+which run_report.py reads.
 """
 
 from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import contextlib
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 HOST = Path(__file__).resolve().parent / "host.py"
+CLI_HOST = Path(__file__).resolve().parent / "cli_host.py"  # the same contract on a subscription CLI (api_base cli:claude | cli:codex)
 SKILL = ROOT / "skills" / "ppt-master"
 SCRIPTS = SKILL / "scripts"
 for _stream in (sys.stdout, sys.stderr):
@@ -502,6 +512,16 @@ def page_task(project: Path, page: dict, anchor: dict | None, note: str = "") ->
             f"SLIDE RECORD\n\n{page['record']}\n")
 
 
+def tier_of_state(state: dict, authors: dict) -> str:
+    """Which tier owns a session, from its state.json. Both hosts write `tier` (from PPT_MASTER_TIER), `model` and `backend`; older sessions
+    without them are matched on model and route, and default to frontier as before."""
+    if state.get("tier") in authors:
+        return state["tier"]
+    model, base = state.get("model"), state.get("api_base")
+    matches = [tier for tier, author in authors.items() if author.get("model") == model and (base is None or author.get("api_base", "https://api.openai.com/v1") == base)]
+    return "workhorse" if "workhorse" in matches and len(matches) == 1 else (matches[0] if len(matches) == 1 else "frontier")
+
+
 class Runner:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
@@ -525,8 +545,90 @@ class Runner:
         self.checker_repairs: dict[str, int] = {}  # checker repair rounds spent per page (page-level and deck-level share the budget)
         self.text_in_shapes = ""
         self.native_refused = ""
+        self.warnings: list[str] = []
+        self._telemetry_lock = threading.Lock()
+        self.telemetry_path = self.sessions / f"{args.session}.runner.jsonl"
         if str(SCRIPTS) not in sys.path:
             sys.path.insert(0, str(SCRIPTS))
+        self.preflight_subscriptions()
+
+    # --- subscription routes and telemetry ------------------------------------------------------
+    def backends(self) -> set[str]:
+        """The subscription CLIs this run's authors and reviewers use (`cli:claude`, `cli:codex`)."""
+        import subscription_cli
+        found = set()
+        for entry in [*self.authors.values(), *self.reviewers.values()]:
+            backend = subscription_cli.backend_of((entry or {}).get("api_base"))
+            if backend:
+                found.add(backend)
+        return found
+
+    def preflight_subscriptions(self) -> None:
+        """Before any stage: each CLI in use must be logged in on the subscription. No model call; refuses the run otherwise."""
+        import subscription_cli
+        for backend in sorted(self.backends()):
+            try:
+                status = subscription_cli.preflight(backend)
+            except subscription_cli.SubscriptionError as exc:
+                self.telemetry({"event": "preflight", "backend": backend, "outcome": "refused", "error": str(exc)})
+                raise SystemExit(f"subscription route refused: {exc}") from exc
+            self.telemetry({"event": "preflight", "backend": backend, "outcome": "ok", "status": status})
+
+    def telemetry(self, record: dict) -> None:
+        """One JSON line in <sessions>/<session>.runner.jsonl: what run_report reads instead of the say() log."""
+        now = time.time()
+        line = {"at": datetime.fromtimestamp(now, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"), "t": round(now, 3), "run": self.args.session, **record}
+        data = (json.dumps(line, ensure_ascii=False, default=str) + "\n").encode("utf-8")
+        with self._telemetry_lock:  # one O_APPEND write per line: page_review.py processes append to the same file (PPT_MASTER_TELEMETRY_FILE)
+            fd = os.open(str(self.telemetry_path), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+            try:
+                os.write(fd, data)
+            finally:
+                os.close(fd)
+
+    @contextlib.contextmanager
+    def stage(self, name: str, **fields):
+        """stage_start / stage_end events around a step; the yielded dict's keys (outcome, ...) go into stage_end."""
+        started = time.time()
+        self.telemetry({"event": "stage_start", "stage": name, **fields})
+        info: dict = {}
+        try:
+            yield info
+        except BaseException as exc:
+            info.setdefault("outcome", f"error: {type(exc).__name__}")
+            raise
+        finally:
+            self.telemetry({"event": "stage_end", "stage": name, **fields, "wall_s": round(time.time() - started, 1), **info})
+
+    def route(self, entry: dict) -> str:
+        import subscription_cli
+        backend = subscription_cli.backend_of(entry.get("api_base"))
+        if backend:
+            return f"cli:{backend}"
+        return "anthropic-messages" if "anthropic.com" in str(entry.get("api_base") or "") else "http-responses"
+
+    def model_call(self, stage: str, reviewer: dict, started: float, usage: dict | None, outcome: str) -> None:
+        """A single-shot call the runner makes itself (blind read, deck review)."""
+        usage = usage or {}
+        cost, source = usage.get("cost"), usage.get("cost_source")
+        if cost is None and usage:
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            import report
+            cost, source = report.cost_of(reviewer.get("model", ""), usage.get("input_tokens") or 0, usage.get("cached_tokens") or 0,
+                                          usage.get("output_tokens") or 0, usage.get("backend") or self.route(reviewer))
+        self.telemetry({"event": "model_call", "stage": stage, "model": reviewer.get("model"), "effort": reviewer.get("effort"),
+                        "backend": usage.get("backend") or self.route(reviewer), "outcome": outcome, "wall_s": round(time.time() - started, 1),
+                        "attempts": usage.get("attempts"), "usage": {"input_tokens": usage.get("input_tokens") or 0, "cached": usage.get("cached_tokens") or 0,
+                                                                     "output_tokens": usage.get("output_tokens") or 0, "reasoning": usage.get("reasoning_tokens") or 0,
+                                                                     "calls": 1 if usage else 0},
+                        "cost_usd": cost, "cost_source": source or "unknown"})
+
+    def session_usage(self, session: str) -> dict:
+        state = self.sessions / session / "state.json"
+        try:
+            return dict(json.loads(state.read_text(encoding="utf-8")).get("usage_total") or {})
+        except (OSError, ValueError):
+            return {}
 
     # --- plumbing ---------------------------------------------------------------------------------
     def script(self, name: str, *script_args: str, check: bool = False) -> subprocess.CompletedProcess:
@@ -542,27 +644,53 @@ class Runner:
                      f"{len(catalog['assets'])} candidate image(s), {len(catalog['issues'])} intake issue(s); "
                      "see analysis/source_visuals/catalog.md")
 
-    def host(self, session: str, tier: str, extra: list[str]) -> int:
+    def host(self, session: str, tier: str, extra: list[str], *, stage: str = "session", page: str | None = None) -> int:
+        """One model-backed session invocation: host.py for an HTTP author, cli_host.py for `cli:claude` / `cli:codex` (same argv, same files).
+        A `model_session` telemetry event records it, with the usage the session's state.json gained during the call."""
         author = self.authors[tier]
+        route = self.route(author)
         env = {**os.environ, "PYTHONUTF8": "1", "PPT_MASTER_MODEL": author["model"], "PPT_MASTER_EFFORT": author.get("effort", "medium"),
                "PPT_MASTER_API_BASE": author.get("api_base", "https://api.openai.com/v1"), "PPT_MASTER_API_KEY_VAR": author.get("key_var", "OPENAI_API_KEY"),
-               "PPT_MASTER_SYSTEM_FILE": str(self.deck_dir / "system.md"), "PPT_MASTER_SESSIONS_DIR": str(self.sessions)}
+               "PPT_MASTER_SYSTEM_FILE": str(self.deck_dir / "system.md"), "PPT_MASTER_SESSIONS_DIR": str(self.sessions), "PPT_MASTER_TIER": tier,
+               "PPT_MASTER_TELEMETRY_FILE": str(self.telemetry_path)}
         env.pop("PPT_MASTER_STATELESS", None)
         env.pop("PPT_MASTER_PROVIDER", None)
         if author.get("provider"):
             env["PPT_MASTER_PROVIDER"] = json.dumps(author["provider"])
         env.update(self.reviewer_env(tier))
+        program = CLI_HOST if route.startswith("cli:") else HOST
+        mode = "task" if "--task-file" in extra else "answer" if "--answer" in extra else "resume" if "--resume-pending" in extra else "?"
+        before = self.session_usage(session)
+        started = time.time()
+        self.telemetry({"event": "model_session_start", "stage": stage, "page": page, "tier": tier, "model": author["model"], "effort": author.get("effort"),
+                        "backend": route, "session": session, "mode": mode})
         log = self.sessions / f"{session}.log"
         with log.open("a", encoding="utf-8") as handle:
-            proc = subprocess.run([sys.executable, str(HOST), "--session", session, "--max-turns", str(self.args.max_turns), *extra],
+            proc = subprocess.run([sys.executable, str(program), "--session", session, "--max-turns", str(self.args.max_turns), *extra],
                                   cwd=str(ROOT), stdout=handle, stderr=subprocess.STDOUT, env=env)
+        after = self.session_usage(session)
+        usage = {k: (after.get(k) or 0) - (before.get(k) or 0) for k in ("input_tokens", "cached", "output_tokens", "reasoning", "calls")}
+        if route.startswith("cli:"):
+            cost = round((after.get("cost_usd") or 0.0) - (before.get("cost_usd") or 0.0), 6) if after.get("cost_usd") is not None else None
+            source = after.get("cost_source") or "unknown"
+        else:
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            import report
+            cost, source = report.cost_of(author["model"], usage.get("input_tokens", 0), usage.get("cached", 0), usage.get("output_tokens", 0), route)
+        self.telemetry({"event": "model_session", "stage": stage, "page": page, "tier": tier, "model": author["model"], "effort": author.get("effort"),
+                        "backend": route, "session": session, "mode": mode, "exit_code": proc.returncode, "outcome": "ok" if proc.returncode == 0 else "failed",
+                        "wall_s": round(time.time() - started, 1), "usage": usage, "cost_usd": cost, "cost_source": source})
         return proc.returncode
 
     def reviewer_env(self, tier: str) -> dict[str, str]:
+        """The reviewer's route for the page_review.py a session runs. `cli:claude` / `cli:codex` pass straight through: the review then runs on
+        that subscription CLI and needs no key (PPT_MASTER_REVIEW_KEY_VAR is left empty so no key is looked up for it)."""
         reviewer = self.reviewers.get(tier) or self.reviewers["workhorse"]
+        base = reviewer.get("api_base", "https://api.openai.com/v1")
+        cli = str(base).strip().lower().startswith("cli:")
         env = {"PPT_MASTER_REVIEW_MODEL": reviewer["model"], "PPT_MASTER_REVIEW_EFFORT": reviewer.get("effort") or "none",
-               "PPT_MASTER_REVIEW_API_BASE": reviewer.get("api_base", "https://api.openai.com/v1"), "PPT_MASTER_REVIEW_KEY_VAR": reviewer.get("key_var", "OPENAI_API_KEY")}
-        if reviewer.get("provider"):
+               "PPT_MASTER_REVIEW_API_BASE": base, "PPT_MASTER_REVIEW_KEY_VAR": "" if cli else reviewer.get("key_var", "OPENAI_API_KEY")}
+        if reviewer.get("provider") and not cli:
             env["PPT_MASTER_REVIEW_PROVIDER"] = json.dumps(reviewer["provider"])
         return env
 
@@ -602,7 +730,7 @@ class Runner:
         self.session_tier[session] = tier + (" (escalated)" if suffix else "")
         started = time.time()
         self.say(f"P{page['number']:02d} {page['stem']}: {tier} author ({self.authors[tier]['model']}) started")
-        code = self.host(session, tier, ["--task-file", str(task)])
+        code = self.host(session, tier, ["--task-file", str(task)], stage="escalation" if suffix else "page", page=page["stem"])
         entry = self.journal_page(page["stem"])
         self.say(f"P{page['number']:02d} {page['stem']}: {entry.get('outcome') or 'no outcome'} "
                  f"(review {(entry.get('review') or {}).get('verdict')}, {entry.get('revisions', 0)} revisions, {time.time() - started:.0f}s, exit {code})")
@@ -663,7 +791,7 @@ class Runner:
             self.escalate(page, anchor)
             self.check_and_repair(page)
 
-    def repair(self, page: dict, issues: list[str], hint: str = "") -> None:
+    def repair(self, page: dict, issues: list[str], hint: str = "", stage: str = "repair") -> None:
         session = self.page_sessions[page["stem"]][-1]
         listing = "\n".join(f"- {text}" for text in issues) + (f"\n\n{hint}" if hint else "")
         message = (f"The deck's final quality checker found blocking issues in your page `{page['stem']}.svg`. This repair is allowed beyond the page's "
@@ -671,7 +799,7 @@ class Runner:
                    f"outcome again with `note` (accepted on PASS, otherwise unresolved with the items named). Then reply `DONE {page['stem']} <outcome>`.\n\n{listing}")
         self.say(f"P{page['number']:02d} {page['stem']}: repair of {len(issues)} item(s)")
         before = json.loads(json.dumps(self.journal_page(page["stem"])))
-        self.host(session, self.authored_by[page["stem"]], ["--answer", message])
+        self.host(session, self.authored_by[page["stem"]], ["--answer", message], stage=stage, page=page["stem"])
         self.settle(page, before)
 
     def settle(self, page: dict, before: dict, user_change: bool = False) -> str:
@@ -716,9 +844,9 @@ class Runner:
         folders = sorted((f for f in self.sessions.glob(f"{self.args.session}.{stem}*") if f.is_dir()), key=lambda f: f.stat().st_mtime)
         if not folders:
             return None
-        state = folders[-1] / "state.json"
-        model = json.loads(state.read_text(encoding="utf-8")).get("model", "") if state.is_file() else ""
-        return folders[-1].name, ("workhorse" if model == self.authors["workhorse"]["model"] else "frontier")
+        state_path = folders[-1] / "state.json"
+        state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.is_file() else {}
+        return folders[-1].name, tier_of_state(state, self.authors)
 
     def revise(self) -> int:
         """Revise from the user's comments: every annotated page goes back to its own author; then checker, export, final lint."""
@@ -752,7 +880,7 @@ class Runner:
             def job(stem=stem, items=items, session=session, tier=tier) -> None:
                 before = json.loads(json.dumps(self.journal_page(stem)))
                 self.say(f"P{pages[stem]['number']:02d} {stem}: {len(items)} comment(s) to its author ({self.authors[tier]['model']})")
-                self.host(session, tier, ["--answer", revision_message(stem, items)])
+                self.host(session, tier, ["--answer", revision_message(stem, items)], stage="revise", page=stem)
                 self.settle(pages[stem], before, user_change=True)
             jobs.append(job)
         self.fan_out(jobs)
@@ -811,21 +939,23 @@ class Runner:
             payload["reasoning"] = {"effort": reviewer["effort"]}
         saved = {k: os.environ.get(k) for k in self.reviewer_env("frontier")}
         os.environ.update(self.reviewer_env("frontier"))
+        review_started = time.time()
         try:
-            review_started = time.time()
             text, usage = page_review._review_call(payload)
         except Exception as exc:  # noqa: BLE001 - the deck still exports without its review
             self.say(f"deck review failed: {exc}")
+            self.model_call("deck_review", reviewer, review_started, None, f"failed: {type(exc).__name__}")
             return
         finally:
             for k, v in saved.items():
                 os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+        self.model_call("deck_review", reviewer, review_started, usage, "ok")
         out = self.project / ".review" / "deck_review.md"
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(f"# Deck review - independent, over the contact sheet\n\n{time.strftime('%Y-%m-%d %H:%M:%S')}\n\n{text.strip()}\n", encoding="utf-8")
         page_review.update_journal(self.project, lambda journal: journal.setdefault("deck_review", []).append(
             {"model": reviewer["model"], "seconds": round(time.time() - review_started, 1), "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-             "usage": {k: usage.get(k) for k in ("input_tokens", "output_tokens", "cost")}}))
+             "usage": {k: usage.get(k) for k in ("input_tokens", "cached_tokens", "output_tokens", "reasoning_tokens", "cost", "cost_source", "backend", "attempts")}}))
         verdict = re.search(r"DECK VERDICT\W{0,6}(PASS|CHANGES)", text, re.I)
         self.say(f"deck review: {verdict.group(1).upper() if verdict else 'unparsed'} -> {out.relative_to(ROOT)}")
 
@@ -841,7 +971,7 @@ class Runner:
             self.authors[tier] = {**saved, "effort": effort}
         started = time.time()
         self.say(f"{name}: {self.authors[tier]['model']} @ {self.authors[tier].get('effort')} started")
-        code = self.host(session, tier, ["--task-file", str(task_file)])
+        code = self.host(session, tier, ["--task-file", str(task_file)], stage=name)
         if effort:
             self.authors[tier] = saved
         self.say(f"{name}: finished in {time.time() - started:.0f}s (exit {code})")
@@ -888,8 +1018,9 @@ class Runner:
             if validated.returncode:
                 errors = validated.stdout.split("[ERROR]", 1)[-1].split("[WARN]", 1)[0]
                 issues.setdefault("Deck", []).append("project validation failed: " + " ".join(errors.split())[:1200])
-            for head, items in self.newcomer_read().items():
-                issues.setdefault(head, []).extend(items)
+            with self.stage("plan_gate", round=revision + 1):
+                for head, items in self.newcomer_read().items():
+                    issues.setdefault(head, []).extend(items)
             if not issues:
                 self.say("plan check: clean after blind reader review")
                 break
@@ -904,7 +1035,7 @@ class Runner:
             saved = dict(self.authors["frontier"])
             self.authors["frontier"] = {**saved, "effort": self.args.planner_effort}
             try:
-                self.host(f"{self.args.session}.planner", "frontier", ["--answer", message])
+                self.host(f"{self.args.session}.planner", "frontier", ["--answer", message], stage="planner_repair")
             finally:
                 self.authors["frontier"] = saved
 
@@ -1099,17 +1230,25 @@ class Runner:
             payload["reasoning"] = {"effort": reviewer["effort"]}
         saved = {k: os.environ.get(k) for k in self.reviewer_env("frontier")}
         os.environ.update(self.reviewer_env("frontier"))
+        started = time.time()
+        review_path = self.project / ".review" / "plan_reader.md"
+        review_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            text, _ = page_review._review_call(payload)
-        except Exception as exc:  # noqa: BLE001 - quality gate reports unavailable reviewer
-            self.say(f"newcomer read unavailable: {type(exc).__name__}")
-            raise SystemExit("blind reader review unavailable; plan cannot be accepted") from exc
+            text, usage = page_review._review_call(payload)
+        except Exception as exc:  # noqa: BLE001 - the blind read is advisory: the plan's own lint and validation still gate it
+            # One transient reviewer failure used to abort the whole run here (SystemExit). _review_call has already retried twice; the
+            # failure is recorded where the reader's report would be and in the telemetry, and planning continues with a warning.
+            warning = f"blind reader review unavailable ({type(exc).__name__}: {str(exc)[:200]}); plan checked without it"
+            self.say(f"WARNING newcomer read: {warning}")
+            self.warnings.append(warning)
+            review_path.write_text(f"# Blind reader review of visible planned slide words\n\nUNAVAILABLE: {warning}\n", encoding="utf-8")
+            self.model_call("newcomer_read", reviewer, started, None, f"failed: {type(exc).__name__}")
+            return {}
         finally:
             for k, v in saved.items():
                 os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+        self.model_call("newcomer_read", reviewer, started, usage, "ok")
         by_number = {p["number"]: f"Slide {p['number']:02d} - {p['name']}" for p in pages}
-        review_path = self.project / ".review" / "plan_reader.md"
-        review_path.parent.mkdir(parents=True, exist_ok=True)
         review_path.write_text("# Blind reader review of visible planned slide words\n\n" + text.strip() + "\n", encoding="utf-8")
         found: dict[str, list[str]] = {}
         for number, problem in re.findall(r"(?im)^\W*slide\s*0?(\d{1,2})\W*:\s*(.+)$", text):
@@ -1245,7 +1384,7 @@ class Runner:
                 "missing on-slide definition or cross-page consistency as the finding specifies. Preserve sourced facts and the page's "
                 "audience question. If the record itself prevents the repair, say so in your note rather than silently ignoring the issue.")
         by_stem = {p["stem"]: p for p in pages}
-        self.fan_out([lambda s=stem, i=items: self.repair(by_stem[s], i, hint) for stem, items in wanted.items()])
+        self.fan_out([lambda s=stem, i=items: self.repair(by_stem[s], i, hint, stage="deck_repair") for stem, items in wanted.items()])
 
     def write_source_map(self, deck: Path) -> int:
         """`<deck>.sources.md`: each slide, its title and the sources its record names - what a later update starts from."""
@@ -1316,7 +1455,7 @@ class Runner:
                         "with a space before the next `<tspan>` (so the joined text reads with its spaces), or list the lines as that cell's `paragraphs` in the same order; a cell "
                         "holding a heading and a paragraph lists both as `paragraphs`. Header cells carry their alignment in the JSON (`\"align\": \"l\"`). Keep the look; then "
                         "run stamp_native_fallbacks.py on the page with --write.")
-                self.fan_out([lambda s=stem, i=items: self.repair(by_stem[s], i, hint) for stem, items in findings.items() if stem in by_stem])
+                self.fan_out([lambda s=stem, i=items: self.repair(by_stem[s], i, hint, stage="parity_repair") for stem, items in findings.items() if stem in by_stem])
                 blocking = self.checker()  # the exporter wants a fresh, passing report for the repaired pages
                 return self.export(dict(blocking) or None)
         if not made and "--native-charts-and-tables" in flags:  # still refused after the authors' repair: ship the drawn tables and say so
@@ -1351,6 +1490,7 @@ class Runner:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         import report
         rows, total_cost, total_calls, total_in, total_out = [], 0.0, 0, 0, 0
+        cost_sources: set[str] = set()
         for page in pages:
             entry = self.journal_page(page["stem"])
             for session in self.page_sessions.get(page["stem"], []):
@@ -1359,6 +1499,7 @@ class Runner:
                 except SystemExit:
                     continue
                 total_cost += r.get("cost_usd") or 0.0
+                cost_sources.add(r.get("cost_source") or "unknown")
                 total_calls += r["calls"]
                 total_in += r["input_tokens"]
                 total_out += r["output_tokens"]
@@ -1372,10 +1513,11 @@ class Runner:
         lint_lines = [f"- `{stem}`: {text}" for stem, items in self.lint_open.items() for text in items]
         lines = [f"# Deck run `{self.args.session}` - {self.project.name}", "",
                  f"Wall time {(time.time() - started) / 60:.1f} min; {len(pages)} pages, {accepted} accepted; {total_calls} author calls; "
-                 f"{total_in / 1e6:.1f}M input tokens, {total_out / 1e3:.0f}k output; author cost ${total_cost:.2f}; {len(reviews)} reviewer calls by {', '.join(review_models) or 'none'}"
+                 f"{total_in / 1e6:.1f}M input tokens, {total_out / 1e3:.0f}k output; author cost ${total_cost:.2f} ({', '.join(sorted(cost_sources)) or 'none'}); {len(reviews)} reviewer calls by {', '.join(review_models) or 'none'}"
                  f"{f' (${review_cost:.2f} where the endpoint reports cost)' if review_cost else ''}, {sum(r.get('seconds') or 0 for r in reviews) / 60:.1f} min of reviewing."
                  + (f" Export: `{deck.relative_to(ROOT).as_posix()}`." if deck else " No export.")
                  + (f" **Exported with {sum(len(v) for v in self.outstanding.values())} checker issue(s) outstanding on {', '.join(self.outstanding)}** - see the `.outstanding.md` beside the deck." if deck and self.outstanding else ""), "",
+                 *(["**Warnings:** " + "; ".join(self.warnings), ""] if self.warnings else []),
                  "| page | tier | author | calls | wall | peak context | cost | outcome |", "|---|---|---|---|---|---|---|---|", *rows, "",
                  *(["## Editable structure", "", self.text_in_shapes, ""] if self.text_in_shapes else []),
                  "## Geometry lint on the pages as shipped", "", *(lint_lines or ["Nothing open: every finding was fixed, or ruled acceptable by the reviewer that passed the page."]), ""]
@@ -1386,12 +1528,18 @@ class Runner:
     # --- the run ----------------------------------------------------------------------------------
     def run(self) -> int:
         started = time.time()
+        self.telemetry({"event": "run_start", "project": str(self.project), "authors": self.authors, "reviewers": self.reviewers,
+                        "max_turns": self.args.max_turns, "max_parallel": self.args.max_parallel})
         spec_path = self.project / "design_spec.md"
         if getattr(self.args, "base_template", None):
-            self.prepare_base_template()
-        self.prepare_source_assets()
-        self.solve()
-        self.plan()
+            with self.stage("base_template"):
+                self.prepare_base_template()
+        with self.stage("source_assets"):
+            self.prepare_source_assets()
+        with self.stage("solution"):
+            self.solve()
+        with self.stage("planner"):
+            self.plan()
         pages = parse_pages(spec_path.read_text(encoding="utf-8"))
         if self.args.pages:
             wanted = {int(p) for p in self.args.pages}
@@ -1405,7 +1553,8 @@ class Runner:
         all_pages = parse_pages(spec_path.read_text(encoding="utf-8"))
         (self.deck_dir / "system.md").write_text(build_system(self.project, all_pages, calibration), encoding="utf-8")
         if not self.args.no_template:
-            self.template(all_pages)
+            with self.stage("template"):
+                self.template(all_pages)
             (self.deck_dir / "system.md").write_text(build_system(self.project, all_pages, calibration) + self.template_rules(), encoding="utf-8")
         templated = all((self.project / "templates" / f"{p['layout']}.svg").is_file() for p in all_pages)
         self.say(f"{len(pages)} page(s): " + ", ".join(f"P{p['number']:02d}:{p['tier']}" for p in pages)
@@ -1417,43 +1566,60 @@ class Runner:
             if (self.project / "svg_output" / f"{anchor['stem']}.svg").is_file() and anchor["number"] not in {p["number"] for p in pages}:
                 self.say(f"anchor P{anchor['number']:02d} already on disk")
             else:
-                self.author(anchor, "frontier" if not self.args.anchor_own_tier else anchor["tier"], anchor)
+                with self.stage("anchor", page=anchor["stem"]):
+                    self.author(anchor, "frontier" if not self.args.anchor_own_tier else anchor["tier"], anchor)
         rest = [p for p in pages if anchor is None or p["stem"] != anchor["stem"]]
-        jobs = [lambda p=p: (self.author(p, p["tier"], anchor), self.after_author(p, anchor)) for p in rest]
+
+        def page_job(p: dict) -> None:
+            with self.stage("page_job", page=p["stem"], tier=p["tier"]) as info:
+                self.author(p, p["tier"], anchor)
+                self.after_author(p, anchor)
+                info["outcome"] = self.journal_page(p["stem"]).get("outcome") or "none"
+
+        jobs = [lambda p=p: page_job(p) for p in rest]
         if anchor is not None and anchor["stem"] in {p["stem"] for p in pages}:
             jobs.append(lambda: self.after_author(anchor, anchor))
-        self.fan_out(jobs)  # each page runs author -> its checker repairs -> escalation on its own, not in lock-step with the others
+        with self.stage("pages", count=len(pages)):
+            self.fan_out(jobs)  # each page runs author -> its checker repairs -> escalation on its own, not in lock-step with the others
 
         by_stem = {p["stem"]: p for p in pages}
-        blocking = self.checker()  # the deck-wide gate: roster and project items, and anything a page's own check could not see
-        for round_number in range(1, self.args.repair_rounds + 1):  # the exporter refuses a deck whose final report has blocking issues
-            to_repair = [(by_stem[stem], issues) for stem, issues in blocking.items()
-                         if stem in by_stem and stem in self.page_sessions and self.checker_repairs.get(stem, 0) < self.args.repair_rounds]
-            if blocking.get("_project"):
-                self.say("checker project issues: " + " | ".join(blocking["_project"])[:600])
-            if not to_repair:
-                break
-            self.say(f"deck checker repair round {round_number}: " + ", ".join(f"{p['stem']} {len(i)}" for p, i in to_repair))
-            for p, _ in to_repair:
-                self.checker_repairs[p["stem"]] = self.checker_repairs.get(p["stem"], 0) + 1
-            self.fan_out([lambda p=p, i=i: self.repair(p, i) for p, i in to_repair])
-            blocking = self.checker()
-        self.say("checker: " + (", ".join(f"{k} {len(v)}" for k, v in blocking.items()) + " blocking issue(s) remain" if blocking else "no blocking issues"))
+        with self.stage("deck_checker") as checker_info:
+            blocking = self.checker()  # the deck-wide gate: roster and project items, and anything a page's own check could not see
+            for round_number in range(1, self.args.repair_rounds + 1):  # the exporter refuses a deck whose final report has blocking issues
+                to_repair = [(by_stem[stem], issues) for stem, issues in blocking.items()
+                             if stem in by_stem and stem in self.page_sessions and self.checker_repairs.get(stem, 0) < self.args.repair_rounds]
+                if blocking.get("_project"):
+                    self.say("checker project issues: " + " | ".join(blocking["_project"])[:600])
+                if not to_repair:
+                    break
+                self.say(f"deck checker repair round {round_number}: " + ", ".join(f"{p['stem']} {len(i)}" for p, i in to_repair))
+                for p, _ in to_repair:
+                    self.checker_repairs[p["stem"]] = self.checker_repairs.get(p["stem"], 0) + 1
+                self.fan_out([lambda p=p, i=i: self.repair(p, i) for p, i in to_repair])
+                blocking = self.checker()
+            self.say("checker: " + (", ".join(f"{k} {len(v)}" for k, v in blocking.items()) + " blocking issue(s) remain" if blocking else "no blocking issues"))
+            checker_info["outcome"] = f"{sum(len(v) for v in blocking.values())} blocking" if blocking else "clean"
 
         deck = None
         if not self.args.skip_export:
-            self.deck_review(all_pages)
+            with self.stage("deck_review"):
+                self.deck_review(all_pages)
             if not self.args.no_deck_repair:
-                self.deck_repair(pages)
-                blocking = self.checker()
+                with self.stage("deck_repair"):
+                    self.deck_repair(pages)
+                    blocking = self.checker()
             outstanding = dict(blocking)  # deck-level (_project) items block the exporter too, so they ship through the override and are listed
             if outstanding and self.args.strict_export:
                 self.say("export skipped (--strict-export): the final checker still reports blocking issues on " + ", ".join(outstanding))
             else:  # the repair budget is spent: the deck ships, with what is still open written beside it
-                deck = self.export(outstanding or None)
+                with self.stage("export") as info:
+                    deck = self.export(outstanding or None)
+                    info["outcome"] = "exported" if deck else "failed"
             self.outstanding = outstanding
-        self.lint_open = self.final_lint(pages)
+        with self.stage("final_lint"):
+            self.lint_open = self.final_lint(pages)
         text = self.summary(pages, started, deck)
+        self.telemetry({"event": "run_end", "wall_s": round(time.time() - started, 1), "deck": str(deck) if deck else None, "warnings": self.warnings})
         print("\n" + text)
         return 0
 
@@ -1462,7 +1628,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("project", help="project directory with design_spec.md and spec_lock.md")
     parser.add_argument("--session", required=True, help="name of this deck run; page sessions are <session>.<stem>")
-    parser.add_argument("--authors", help="JSON mapping tier -> {model, effort, api_base, key_var}; merged over the defaults")
+    parser.add_argument("--authors", help="JSON mapping tier -> {model, effort, api_base, key_var}; merged over the defaults. api_base cli:claude or cli:codex runs "
+                                          "that tier on the subscription CLI (see route_profiles/)")
     parser.add_argument("--reviewers", help="JSON mapping tier -> {model, effort, api_base, key_var, provider} for the independent reviewer; merged over the defaults")
     parser.add_argument("--premium", action="store_true", help="frontier pages by Claude Opus 5.5 @ medium instead of Sol: best-looking hard pages, about 3.5x the cost, no faster")
     parser.add_argument("--max-parallel", type=int, default=16, help="pages authored at once (16 since 23 Sep 2026: a 10-12 page deck no longer queues pages behind the first 8)")

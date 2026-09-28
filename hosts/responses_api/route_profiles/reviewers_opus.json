@@ -1,0 +1,4 @@
+{
+  "workhorse": {"model": "claude-opus-5-5", "effort": "high", "api_base": "cli:claude"},
+  "frontier": {"model": "claude-opus-5-5", "effort": "high", "api_base": "cli:claude"}
+}

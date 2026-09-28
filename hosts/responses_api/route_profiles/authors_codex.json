@@ -1,0 +1,4 @@
+{
+  "workhorse": {"model": "gpt-6-luna", "effort": "high", "api_base": "cli:codex"},
+  "frontier": {"model": "gpt-6-sol", "effort": "high", "api_base": "cli:codex"}
+}

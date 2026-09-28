@@ -5,7 +5,11 @@
 
 Reads each session's transcript.jsonl (turn usage, tool calls and results, start/end times) and the
 project journal (quality-run.json) the session worked on. Cost is OpenRouter's own per-turn figure when
-present, otherwise computed from PRICES (USD per token: prompt, cached prompt, completion). API latency
+present, otherwise computed from PRICES (USD per token: prompt, cached prompt, completion). Every cost carries
+a `cost_source`: `billed-api` (a keyed endpoint; OpenRouter's figure or list price), `subscription-notional-list-price`
+(a subscription CLI session - cli_host.py - whose calls bill nothing: Claude's own list-price estimate, or
+Codex tokens at PRICES) or `unknown`. For a CLI session the token totals are the CLI's own per-invocation
+accounting (the `usage_run` of each `end` event), since its streamed per-turn output counts are partial. API latency
 is estimated as wall time minus the scripts' own reported run time when turns carry no timestamps
 (sessions before the host logged `at` and `api_s`), and measured when they do.
 """
@@ -32,7 +36,18 @@ PRICES = {  # USD per token; OpenRouter's listing, September 2026
     "moonshotai/kimi-k3": (1.7e-6, 0.17e-6, 8.5e-6),
     "deepseek/deepseek-v4.1-flash": (0.15e-6, 0.003e-6, 0.6e-6),
 }
+COST_BILLED, COST_NOTIONAL, COST_UNKNOWN = "billed-api", "subscription-notional-list-price", "unknown"
 _EXIT_TIME = re.compile(r"exit (\d+) in ([\d.]+)s")
+
+
+def cost_of(model: str, input_tokens: int, cached: int, output_tokens: int, backend: str | None = None) -> tuple[float | None, str]:
+    """(USD, cost_source) for tokens at PRICES. A `cli:*` backend is a subscription: the figure is notional, never a bill."""
+    prices = PRICES.get(model) or PRICES.get((model or "").split("/")[-1])
+    if not prices:
+        return None, COST_UNKNOWN
+    p_in, p_cached, p_out = prices
+    cost = max(0, input_tokens - cached) * p_in + cached * p_cached + output_tokens * p_out
+    return cost, (COST_NOTIONAL if str(backend or "").startswith("cli:") else COST_BILLED)
 _REVIEW_TIME = re.compile(r"\[review\] .*?\((\d+)s\)")
 
 
@@ -67,35 +82,44 @@ def analyse(session_dir: Path) -> dict:
     images = sum(len(e.get("paths") or []) for e in events if e.get("event") == "images_delivered")
     http_errors = [e for e in events if e.get("event") in ("http_error", "transport_error")]
     model = start.get("model", "?")
+    backend = start.get("backend") or ("anthropic-messages" if "anthropic.com" in str(start.get("api_base") or "") else "http-responses")
     r: dict = {"session": session_dir.name, "model": model, "effort": start.get("effort"), "api_base": start.get("api_base", "https://api.openai.com/v1"),
-               "stateless": start.get("stateless", False), "finished": end is not None}
+               "backend": backend, "stateless": start.get("stateless", False), "finished": end is not None}
     # tokens
     inp = sum(t["usage"].get("input_tokens", 0) for t in turns)
     cached = sum((t["usage"].get("input_tokens_details") or {}).get("cached_tokens", 0) for t in turns)
     out = sum(t["usage"].get("output_tokens", 0) for t in turns)
     reasoning = sum((t["usage"].get("output_tokens_details") or {}).get("reasoning_tokens", 0) for t in turns)
-    r.update({"calls": len(turns), "input_tokens": inp, "cached_tokens": cached, "cache_ratio": (cached / inp) if inp else 0.0,
+    calls = len(turns)
+    runs = [e["usage_run"] for e in events if e.get("event") == "end" and isinstance(e.get("usage_run"), dict)]
+    if runs:  # a CLI session: its own accounting per invocation (Claude's streamed per-turn output counts are partial)
+        inp = sum(u.get("input_tokens") or 0 for u in runs)
+        cached = sum(u.get("cached") or 0 for u in runs)
+        out = sum(u.get("output_tokens") or 0 for u in runs)
+        reasoning = sum(u.get("reasoning") or 0 for u in runs)
+        calls = sum(u.get("calls") or 0 for u in runs)
+    r.update({"calls": calls, "input_tokens": inp, "cached_tokens": cached, "cache_ratio": (cached / inp) if inp else 0.0,
               "output_tokens": out, "reasoning_tokens": reasoning, "reasoning_share": (reasoning / out) if out else 0.0,
               "max_context": max((t["usage"].get("input_tokens", 0) for t in turns), default=0),
-              "output_per_call": (out / len(turns)) if turns else 0.0})
+              "output_per_call": (out / calls) if calls else 0.0})
     # cost
     reported = [t["usage"].get("cost") for t in turns if t["usage"].get("cost") is not None]
-    if reported and len(reported) == len(turns):
-        r["cost_usd"], r["cost_source"] = sum(reported), "openrouter"
+    if runs:
+        known = [u.get("cost_usd") for u in runs if u.get("cost_usd") is not None]
+        sources = {u.get("cost_source") or COST_UNKNOWN for u in runs}
+        r["cost_usd"] = sum(known) if known else None
+        r["cost_source"] = sources.pop() if len(sources) == 1 else "mixed"
+    elif reported and len(reported) == len(turns):
+        r["cost_usd"], r["cost_source"] = sum(reported), COST_BILLED
     else:
-        prices = PRICES.get(model) or PRICES.get(model.split("/")[-1])
-        if prices:
-            p_in, p_cached, p_out = prices
-            r["cost_usd"], r["cost_source"] = (inp - cached) * p_in + cached * p_cached + out * p_out, "list price"
-        else:
-            r["cost_usd"], r["cost_source"] = None, "unknown"
+        r["cost_usd"], r["cost_source"] = cost_of(model, inp, cached, out, backend)
     # time
     wall = ((end or {}).get("at") or 0) - (start.get("at") or 0) if end else None
     script_s = sum(float(m.group(2)) for e in tools for m in [_EXIT_TIME.search(e.get("result") or "")] if m)
     review_s = [int(m.group(1)) for e in tools for m in [_REVIEW_TIME.search(e.get("result") or "")] if m]
     measured = [t.get("api_s") for t in turns if t.get("api_s") is not None]
     r.update({"wall_s": wall, "script_s": script_s, "review_call_s": review_s,
-              "api_s_per_call": (statistics.mean(measured) if measured else ((wall - script_s) / len(turns) if wall and turns else None)),
+              "api_s_per_call": (statistics.mean(measured) if measured else ((wall - script_s) / calls if wall and calls else None)),
               "api_latency_source": "measured" if measured else "wall minus scripts"})
     # tool use
     by_name = collections.Counter(e.get("name") for e in tools)
@@ -173,7 +197,7 @@ def markdown(rows: list[dict]) -> str:
     def row(label, fn):
         lines.append(f"| {label} | " + " | ".join(str(fn(r)) for r in rows) + " |")
     row("model @ effort", lambda r: f"{r['model']} @ {r['effort']}")
-    row("transport", lambda r: ("OpenRouter, stateless" if r["stateless"] else "OpenAI, stateful"))
+    row("transport", lambda r: (r["backend"] + " (subscription)" if str(r.get("backend", "")).startswith("cli:") else "OpenRouter, stateless" if r["stateless"] else "OpenAI, stateful"))
     row("finished / exported", lambda r: f"{'yes' if r['finished'] else 'no'} / {'yes' if r.get('exported') else 'no'}")
     row("API calls", lambda r: r["calls"])
     row("tool calls", lambda r: r["tool_calls"])

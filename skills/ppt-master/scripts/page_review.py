@@ -367,23 +367,88 @@ def _review_call_chat(payload: dict, base: str, key: str) -> tuple[str, dict]:
     return (answer["choices"][0]["message"].get("content") or ""), {"input_tokens": usage.get("prompt_tokens"), "output_tokens": usage.get("completion_tokens")}
 
 
-def _review_call(payload: dict) -> tuple[str, dict]:
-    """One Responses API call with no history. Returns (text, usage). PPT_MASTER_REVIEW_API_BASE / _KEY_VAR / _PROVIDER point it at
-    another endpoint (OpenRouter), so the reviewer can come from a different model family than the author it reviews."""
+REVIEW_RETRIES = 2  # at most two retries after a failed attempt, for HTTP and CLI reviewers alike
+REVIEW_BACKOFF_S = (15, 45)
+_RETRY_HTTP = {408, 409, 425, 429, 500, 502, 503, 504, 520, 522, 524, 529}
+
+
+def _review_call_once(payload: dict, base: str) -> tuple[str, dict]:
+    """One review request. `cli:claude` / `cli:codex` go to the subscription CLI (subscription_cli.py); anything else is a Responses API
+    endpoint (or Google's chat-completions one)."""
     import urllib.request
-    base = os.environ.get("PPT_MASTER_REVIEW_API_BASE", "https://api.openai.com/v1").rstrip("/")
+    import subscription_cli
+    if subscription_cli.backend_of(base):
+        return subscription_cli.review(payload, base)
     key_var = os.environ.get("PPT_MASTER_REVIEW_KEY_VAR", "OPENAI_API_KEY")
     if "openrouter" in base and os.environ.get("PPT_MASTER_REVIEW_PROVIDER"):
         payload = {**payload, "provider": json.loads(os.environ["PPT_MASTER_REVIEW_PROVIDER"])}
     if "generativelanguage.googleapis.com" in base:
-        return _review_call_chat(payload, base, _api_key(key_var))
-    request =urllib.request.Request(base + "/responses", data=json.dumps(payload).encode("utf-8"),
-                                     headers={"Authorization": f"Bearer {_api_key(key_var)}", "Content-Type": "application/json"}, method="POST")
-    with urllib.request.urlopen(request, timeout=900) as response:
-        body = json.load(response)
-    text = "\n".join(c.get("text", "") for item in body.get("output") or [] if item.get("type") == "message"
-                     for c in item.get("content") or [] if c.get("type") == "output_text")
-    return text, body.get("usage") or {}
+        text, usage = _review_call_chat(payload, base, _api_key(key_var))
+    else:
+        request = urllib.request.Request(base + "/responses", data=json.dumps(payload).encode("utf-8"),
+                                         headers={"Authorization": f"Bearer {_api_key(key_var)}", "Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(request, timeout=900) as response:
+            body = json.load(response)
+        text = "\n".join(c.get("text", "") for item in body.get("output") or [] if item.get("type") == "message"
+                         for c in item.get("content") or [] if c.get("type") == "output_text")
+        usage = body.get("usage") or {}
+    usage = dict(usage)
+    usage.setdefault("backend", "http")
+    usage.setdefault("cost_source", "billed-api")  # a keyed endpoint bills per call; the cost may be priced later (run_report.REVIEWER_PRICES)
+    return text, usage
+
+
+def _retryable(exc: BaseException) -> bool:
+    import http.client
+    import urllib.error
+    import subscription_cli
+    if isinstance(exc, subscription_cli.SubscriptionError):  # auth or key billing: never retried, never worked around
+        return False
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code in _RETRY_HTTP
+    return isinstance(exc, (subscription_cli.CliCallError, urllib.error.URLError, ConnectionError, TimeoutError, OSError,
+                            http.client.HTTPException, json.JSONDecodeError))
+
+
+def _review_call(payload: dict) -> tuple[str, dict]:
+    """One review with no history, retried at most twice (15 s, then 45 s) on a transient failure. Returns (text, usage); usage carries
+    `backend`, `cost_source` and `attempts`. PPT_MASTER_REVIEW_API_BASE / _KEY_VAR / _PROVIDER point it at another endpoint (OpenRouter)
+    or at a subscription CLI (`cli:claude`, `cli:codex`), so the reviewer can come from a different model family than the author."""
+    base = os.environ.get("PPT_MASTER_REVIEW_API_BASE", "https://api.openai.com/v1").strip().rstrip("/")
+    failures = []
+    for attempt in range(REVIEW_RETRIES + 1):
+        try:
+            text, usage = _review_call_once(payload, base)
+            usage["attempts"] = attempt + 1
+            if failures:
+                usage["failed_attempts"] = failures
+            return text, usage
+        except Exception as exc:  # noqa: BLE001 - classified below
+            failures.append(f"{type(exc).__name__}: {str(exc)[:200]}")
+            if attempt >= REVIEW_RETRIES or not _retryable(exc):
+                raise
+            print(f"[review] attempt {attempt + 1} failed ({failures[-1]}); retrying in {REVIEW_BACKOFF_S[attempt]}s", file=sys.stderr, flush=True)
+            time.sleep(REVIEW_BACKOFF_S[attempt])
+    raise RuntimeError("unreachable")
+
+
+def _telemetry(project: Path, record: dict) -> None:
+    """One line in the runner's runner.jsonl (PPT_MASTER_TELEMETRY_FILE, set by deck_runner). One O_APPEND write per line, so parallel
+    page sessions and the runner never interleave inside a line."""
+    target = os.environ.get("PPT_MASTER_TELEMETRY_FILE")
+    if not target:
+        return
+    from datetime import datetime, timezone
+    now = time.time()
+    line = {"at": datetime.fromtimestamp(now, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"), "t": round(now, 3), "project": project.name, **record}
+    try:
+        fd = os.open(target, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+        try:
+            os.write(fd, (json.dumps(line, ensure_ascii=False, default=str) + "\n").encode("utf-8"))
+        finally:
+            os.close(fd)
+    except OSError:  # telemetry never fails a review
+        pass
 
 
 def _slide_record(project: Path, stem: str) -> str:
@@ -486,7 +551,8 @@ def cmd_review(args: argparse.Namespace) -> int:
     out.write_text(f"# {stem} rev{rev} - independent review\n\nmodel {model} effort {effort} - {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n{text.strip()}\n", encoding="utf-8")
     review = {"sha": digest, "rev": rev, "lint_items_ruled": len(flagged), "verdict": verdict, "blockers": blockers, "file": str(out.relative_to(project)).replace("\\", "/"),
               "model": model, "effort": effort, "references": [str(r) for r in references], "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-              "usage": {k: usage.get(k) for k in ("input_tokens", "output_tokens", "cost")}, "seconds": round(time.time() - started, 1)}
+              "usage": {k: usage.get(k) for k in ("input_tokens", "cached_tokens", "output_tokens", "reasoning_tokens", "cost", "cost_source", "backend", "attempts")},
+              "seconds": round(time.time() - started, 1)}
 
     def keep(current: dict) -> None:  # the reviewer call ran outside the lock; only this page's entry is written back
         page = _page_entry(current, stem)
@@ -494,6 +560,11 @@ def cmd_review(args: argparse.Namespace) -> int:
         page.setdefault("review_log", []).append({k: review[k] for k in ("rev", "verdict", "model", "usage", "seconds")})
 
     update_journal(project, keep)
+    _telemetry(project, {"event": "model_call", "stage": "page_review", "page": stem, "rev": rev, "verdict": verdict, "model": model, "effort": effort,
+                         "backend": usage.get("backend"), "outcome": "ok", "wall_s": review["seconds"], "attempts": usage.get("attempts"),
+                         "usage": {"input_tokens": usage.get("input_tokens") or 0, "cached": usage.get("cached_tokens") or 0,
+                                   "output_tokens": usage.get("output_tokens") or 0, "reasoning": usage.get("reasoning_tokens") or 0, "calls": 1},
+                         "cost_usd": usage.get("cost"), "cost_source": usage.get("cost_source")})
     print(text.strip())
     print(f"\n[review] {stem} rev{rev}: {verdict}, blockers {blockers if blockers is not None else '?'} ({time.time() - started:.0f}s); "
           + ("record `accepted` only after every blocker is fixed and a new render is reviewed" if verdict != "PASS" else "this revision may be accepted"))
