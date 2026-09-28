@@ -954,6 +954,29 @@ def _table_text_cells(
     return records
 
 
+def _fallback_right_aligned_cells(
+    elem: ET.Element,
+    payload: dict[str, Any],
+    table_rows: list[list[Any]],
+) -> dict[tuple[int, int], bool]:
+    """fork (F03): body cells whose drawn fallback text is end-anchored (numbers
+    in a right-aligned column). A payload that leaves such a cell at the default
+    left alignment exported it left-aligned in PowerPoint while the reviewed
+    preview showed it right-aligned (kirkland2 s11: six numeric columns)."""
+    try:
+        grid = _table_fallback_grid(elem, payload, table_rows)
+    except Exception:  # noqa: BLE001 - the projection is best effort; the payload still exports
+        return {}
+    if grid is None:
+        return {}
+    column_edges, row_edges, _shapes, text_records = grid
+    found: dict[tuple[int, int], bool] = {}
+    for record, row_idx, col_idx in _table_text_cells(text_records, table_rows, column_edges, row_edges):
+        if _fallback_table_alignment(getattr(record, "anchor", "") or "") == "r":
+            found[(row_idx, col_idx)] = True
+    return found
+
+
 def _fallback_table_alignment(anchor: str) -> str:
     return {
         "middle": "ctr",
@@ -1819,6 +1842,7 @@ def _build_native_table(elem: ET.Element, ctx: ConvertContext, payload: dict[str
     )
 
     grid_xml = "".join(f'<a:gridCol w="{width}"/>' for width in grid_widths)
+    fallback_right = {} if preserve_source_style else _fallback_right_aligned_cells(elem, payload, table_rows)
     rows_xml: list[str] = []
     for row_idx, row in enumerate(table_rows):
         is_header = row_idx < header_rows
@@ -1890,6 +1914,8 @@ def _build_native_table(elem: ET.Element, ctx: ConvertContext, payload: dict[str
                     header_text if is_header else body_text,
                 )
                 align = str(cell_data.get("align") or ("ctr" if is_header else "l"))
+                if not is_header and align == "l" and fallback_right.get((row_idx, col_idx)):
+                    align = "r"  # fork (F03): the drawn fallback right-aligns this body cell (a numeric column)
             if align not in {"l", "ctr", "r", "just"}:
                 align = "l"
             paragraphs = _table_cell_paragraphs(cell_data)
