@@ -51,7 +51,37 @@ _STOP = {"the", "a", "an", "of", "and", "or", "to", "in", "on", "for", "with", "
 
 
 def _words(text: str) -> set[str]:
-    return {w for w in re.findall(r"[a-z][a-z-]+", text.lower()) if w not in _STOP and len(w) > 2}
+    words = set()
+    for w in re.findall(r"[a-z][a-z-]+", text.lower()):
+        if w in _STOP or len(w) <= 2:
+            continue
+        words.add(w[:-1] if len(w) > 4 and w.endswith("s") and not w.endswith("ss") else w)  # timelines ~ timeline
+    return words
+
+
+# Related exhibit forms (the planner's Exhibit vocabulary): a near form is still a useful structural reference.
+RELATED_FORMS = {
+    "bar-comparison": {"time-series", "part-to-whole", "key-figures", "comparison-table"},
+    "time-series": {"bar-comparison", "part-to-whole"},
+    "part-to-whole": {"bar-comparison", "time-series"},
+    "distribution": {"bar-comparison"},
+    "correlation": {"matrix"},
+    "key-figures": {"bar-comparison", "summary"},
+    "process-flow": {"loop", "timeline", "architecture"},
+    "loop": {"process-flow"},
+    "architecture": {"hub-and-spoke", "hierarchy", "process-flow"},
+    "hub-and-spoke": {"architecture", "hierarchy"},
+    "hierarchy": {"architecture", "team"},
+    "matrix": {"comparison-table", "correlation"},
+    "timeline": {"process-flow"},
+    "table": {"comparison-table"},
+    "comparison-table": {"table", "matrix"},
+    "annotated-example": {"architecture"},
+    "text-argument": {"summary"},
+    "team": {"hierarchy"},
+    "summary": {"text-argument", "key-figures"},
+    "closing": {"text-argument"},
+}
 
 
 def _index_path(library: Path) -> Path:
@@ -84,16 +114,18 @@ def score(entry: dict, form: str | None, need: set[str], density: str | None) ->
     if form and labels.get("communication_form") == form:
         total += 4.0
         why.append(f"same communication form ({form})")
-    elif form and form in _words(" ".join([labels.get("archetype") or "", labels.get("topology") or ""])):
+    elif form and (labels.get("communication_form") in RELATED_FORMS.get(form, set())
+                   or form in _words(" ".join([labels.get("archetype") or "", labels.get("topology") or ""]))):
         total += 2.0
         why.append(f"related form ({labels.get('communication_form')})")
-    structure = _words(" ".join([labels.get("semantic_topology") or "", labels.get("description") or "",
+    structure = _words(" ".join([labels.get("semantic_topology") or "", labels.get("description") or "", labels.get("purpose") or "",
+                                 labels.get("why") or "", *(labels.get("use_cases") or []), *(labels.get("take") or []),
                                  *(labels.get("devices") or []), *(labels.get("hierarchy_devices") or [])]))
     shared = sorted(need & structure)
     if shared:
         total += min(4.0, 0.8 * len(shared))
         why.append("shares " + ", ".join(shared[:6]))
-    if density and density in {labels.get("density"), labels.get("density_band")}:
+    if density and (density in {labels.get("density"), labels.get("density_band")} or density in str(labels.get("density") or "").split("-")):
         total += 1.0
         why.append(f"{density} density")
     return total, why
@@ -128,6 +160,16 @@ def _print(entry: dict, library: Path, total: float | None, why: list[str], *, c
         print(f"  rejected because: {entry['reason']}")
     for line in observations(entry):
         print(f"  {line}")
+    if labels.get("why"):
+        print(f"  why it works: {labels['why']}")
+    if labels.get("take"):
+        print("  take: " + "; ".join(labels["take"]))
+    if labels.get("avoid"):
+        print("  avoid: " + "; ".join(labels["avoid"]))
+    if labels.get("typography"):
+        print(f"  typography: {labels['typography']} (our type floors still apply)")
+    if entry.get("restrictions"):
+        print(f"  provenance: {entry['restrictions']}")
     print("  Borrow the structure and devices that fit this page's content; never its facts, wording, counts or branding.")
     print(f"IMAGE: {image}")
     return image
@@ -326,6 +368,8 @@ def cmd_match(args: argparse.Namespace, library: Path, entries: list[dict]) -> i
         if total > 0:
             ranked.append((total, entry, why))
     ranked.sort(key=lambda item: -item[0])
+    if ranked and ranked[0][0] >= WEAK_SCORE and not wanted_rejected:
+        ranked = [item for item in ranked if item[0] >= WEAK_SCORE]  # a strong match exists: do not pad with weak ones
     if not ranked:
         print("no useful reference for this page: author it directly")
         return 0
@@ -337,9 +381,35 @@ def cmd_match(args: argparse.Namespace, library: Path, entries: list[dict]) -> i
     return 0
 
 
+def curate(library: Path, spec_path: Path) -> list[dict]:
+    """Build a curated library from a spec: each entry names a rendered page image (`image_source`, optional `crop`
+    [left, top, right, bottom] in px), its source deck and page, and the lead's labels (form, purpose, composition,
+    density, typography, use cases, why it works, what to take and avoid, restrictions). Replaces the index."""
+    from PIL import Image
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    library.mkdir(parents=True, exist_ok=True)
+    (library / "images").mkdir(exist_ok=True)
+    entries = []
+    for item in spec["entries"]:
+        source_image = Path(item["image_source"])
+        image = Image.open(source_image).convert("RGB")
+        if item.get("crop"):
+            image = image.crop(tuple(item["crop"]))
+        target = library / "images" / f"{item['id']}.png"
+        image.save(target)
+        labels = {"communication_form": item["form"], "purpose": item.get("purpose"), "semantic_topology": item.get("composition"),
+                  "density": item.get("density"), "typography": item.get("typography"), "use_cases": item.get("use_cases") or [],
+                  "why": item.get("why"), "take": item.get("take") or [], "avoid": item.get("avoid") or []}
+        entries.append({"id": item["id"], "source": item.get("source") or str(source_image), "page": item.get("page"),
+                        "image": f"images/{item['id']}.png", "sha256": hashlib.sha256(target.read_bytes()).hexdigest(),
+                        "labels": labels, "origin": "curated", "restrictions": item.get("restrictions"), "verdict": "good"})
+    save(library, entries)
+    return entries
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("command", choices=("build", "sheet", "label", "show", "match", "counterexamples", "forms"))
+    parser.add_argument("command", choices=("build", "curate", "sheet", "label", "show", "match", "counterexamples", "forms"))
     parser.add_argument("ids", nargs="*", help="deck files for build; entry ids for label and show")
     parser.add_argument("--library", default=os.environ.get("PPT_MASTER_REFERENCE_LIBRARY"))
     parser.add_argument("--form")
@@ -360,6 +430,12 @@ def main() -> int:
         print("no reference library is configured (PPT_MASTER_REFERENCE_LIBRARY): continue without references and say so in the run summary")
         return 3
     library = Path(args.library).resolve()
+    if args.command == "curate":
+        if len(args.ids) != 1:
+            raise SystemExit("curate needs one spec file")
+        entries = curate(library, Path(args.ids[0]))
+        print(f"library {library}: {len(entries)} curated entries")
+        return 0
     if args.command == "build":
         if not args.ids:
             raise SystemExit("build needs at least one deck file")

@@ -17,7 +17,7 @@ import subprocess
 import sys
 
 
-DOCUMENT_SUFFIXES = {".pptx", ".pptm", ".ppsx", ".ppsm", ".potx", ".potm", ".pdf", ".docx", ".doc", ".odt"}
+DOCUMENT_SUFFIXES = {".pptx", ".pptm", ".ppsx", ".ppsm", ".potx", ".potm", ".pdf", ".docx", ".doc", ".odt", ".xlsx", ".xlsm", ".xls"}
 PRESENTATION_SUFFIXES = {".pptx", ".pptm", ".ppsx", ".ppsm", ".potx", ".potm"}
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".tif", ".svg", ".emf", ".wmf"}
 
