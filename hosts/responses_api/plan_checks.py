@@ -42,6 +42,9 @@ EXHIBITS = {
 FURNITURE = {"cover", "section-divider", "closing"}
 TABULAR = {"table", "comparison-table"}
 TITLE_MAX_WORDS = 15
+# a page that maps the client's requirements back to them (the user's standing rule: needs are answered through the story)
+ECHO = re.compile(r"(?i)\b(?:(?:RFP|request|brief|tender|scope)\W+(?:\w+\W+){0,6}?(?:requirements?|objectives?|scope items?|deliverables?)\b.{0,80}\b(?:owning|owned|mapped|covered|addressed|answered)\b"
+                  r"|requirements?\s+(?:coverage|compliance|traceability)|compliance\s+matrix|(?:RFP|request)\s+(?:section|§)\s*\d)")
 _FIELD = r"- \*\*{name}\*\*(?: \([^)]*\))?:(.*?)(?=\n- \*\*[A-Z][^*]*\*\*|\n#{{2,4}} |\Z)"
 # figures a reader would check: money, percentages, durations, counts with a unit, and plain numbers of 3+ digits
 FIGURE = re.compile(r"(?<![\w.])(?:[A-Z]{3}\s?|[$€£¥])?\d[\d,]*(?:\.\d+)?\s?(?:%|[kKmMbB]n?\b|x\b|h\b|min\b|hours?\b|days?\b|weeks?\b|months?\b|pt\b|px\b)?")
@@ -158,6 +161,9 @@ def story_lint(spec: str) -> dict[str, list[str]]:
                 issues.append(f"title `{title}` reads as a topic label: state what the reader should conclude from this page")
         copy = " ".join(_field(block, n) for n in ("Title", "Core message", "Content"))
         copy = re.sub(r"\[To be provided:[^\]]*\]", " ", copy)
+        if ECHO.search(" ".join(_field(block, n) for n in ("Title", "Core message", "Exhibit", "Visual task"))):
+            issues.append("the page maps the client's requirements back to them (a coverage or compliance view): keep that check as your "
+                          "working and answer the needs through the story, design and diagrams instead")
         if has_register:
             for m in FIGURE.finditer(copy):
                 token = m.group(0)

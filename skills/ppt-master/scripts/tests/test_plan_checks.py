@@ -85,3 +85,11 @@ def test_helpers():
     spec = deck(GOOD)
     assert storyline_titles(spec)[1].startswith("Fund option B")
     assert "42000" in fact_register(spec)
+
+
+def test_a_requirements_coverage_page_is_flagged():
+    recs = GOOD[:2] + [record(3, "Coverage", exhibit="table - look-up of each request item",
+                              title="Every objective, scope item and deliverable in the City's request has an owning task")] + GOOD[3:]
+    recs[-1] = recs[-1].replace("Slide 04", "Slide 04")
+    found = story_lint(deck(recs, storyline=[r.split("- **Title**: ")[1].split("\n")[0] for r in recs]))
+    assert any("maps the client's requirements back" in i for i in found["Slide 03 - Coverage"])
