@@ -677,3 +677,69 @@ def test_a_page_review_writes_its_own_telemetry_line(tmp_path, monkeypatch):
     assert line["usage"]["reasoning"] == 30 and line["cost_source"] == "subscription-notional-list-price" and line["at"].endswith("Z")
     usage = page_review.load_journal(project)["pages"]["01_cover"]["review_log"][0]["usage"]
     assert usage["backend"] == "cli:codex" and usage["cost_source"] == "subscription-notional-list-price"
+
+
+# --- page sessions: one page each, never abandoned unwritten (campaign F01 cycle 2) ------------------------------------
+
+def test_a_page_session_writes_only_its_own_page(monkeypatch):
+    import host
+    folder = ROOT / ".host-sessions" / "_test_own_page"
+    (folder / "svg_output").mkdir(parents=True, exist_ok=True)
+    try:
+        own = folder / "svg_output" / "04_luna_cut_spend.svg"
+        rel = lambda p: p.relative_to(ROOT).as_posix()
+        monkeypatch.setenv("PPT_MASTER_PAGE_FILE", str(own))
+        with pytest.raises(ValueError, match="04_luna_cut_spend.svg"):  # the drifted name is refused and the right one named
+            host.tool_write_file(rel(folder / "svg_output" / "04_luna_spend.svg"), "<svg/>")
+        assert not (folder / "svg_output" / "04_luna_spend.svg").exists()
+        assert "wrote" in host.tool_write_file(rel(own), "<svg><g id='a'/></svg>")
+        assert "edited" in host.tool_edit_file(rel(own), "id='a'", "id='b'")
+        (folder / "svg_output" / "03_other.svg").write_text("<svg id='x'/>", encoding="utf-8")
+        with pytest.raises(ValueError, match="authors one page"):
+            host.tool_edit_file(rel(folder / "svg_output" / "03_other.svg"), "id='x'", "id='y'")
+        assert "wrote" in host.tool_write_file(rel(folder / "notes" / "timeline.json"), "{}")  # other files stay writable
+        monkeypatch.delenv("PPT_MASTER_PAGE_FILE")
+        assert "wrote" in host.tool_write_file(rel(folder / "svg_output" / "03_other.svg"), "<svg/>")  # planner/template sessions: no guard
+    finally:
+        import shutil
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+def test_runner_names_the_page_file_and_continues_a_session_that_wrote_no_page(tmp_path, monkeypatch):
+    deck_runner, runner = _runner(tmp_path)
+    runner.page_sessions, runner.authored_by, runner.session_tier = {}, {}, {}
+    monkeypatch.setattr(deck_runner, "page_task", lambda project, page, anchor, note="": "task")
+    monkeypatch.setattr(runner, "journal_page", lambda stem: {}, raising=False)
+    seen = []
+
+    def fake_run(argv, cwd, stdout, stderr, env):
+        seen.append({"argv": argv, "env": env})
+        session = argv[argv.index("--session") + 1]
+        (runner.sessions / session).mkdir(exist_ok=True)
+        if len(seen) == write_on:
+            (runner.project / "svg_output").mkdir(exist_ok=True)
+            (runner.project / "svg_output" / "02_fees.svg").write_text("<svg/>", encoding="utf-8")
+        return subprocess.CompletedProcess(argv, 0)
+    monkeypatch.setattr(deck_runner.subprocess, "run", fake_run)
+    page = {"number": 2, "stem": "02_fees"}
+    write_on = 2  # the first session stops without writing; one continuation writes the page
+    runner.author(page, "workhorse", None)
+    assert len(seen) == 2 and seen[0]["env"]["PPT_MASTER_PAGE_FILE"] == str(runner.project / "svg_output" / "02_fees.svg")
+    answer = seen[1]["argv"][seen[1]["argv"].index("--answer") + 1]
+    assert "02_fees.svg" in answer and "write_file" in answer and "read-only" in answer and "DONE 02_fees" in answer
+    stages = [e["stage"] for e in _events(runner.telemetry_path) if e["event"] == "model_session"]
+    assert stages == ["page", "page_retry"]
+    seen.clear()
+    (runner.project / "svg_output" / "02_fees.svg").unlink()
+    write_on = 99  # never written: two continuations, then the runner moves on
+    runner.author(page, "workhorse", None)
+    assert len(seen) == 1 + deck_runner.AUTHOR_NO_PAGE_RETRIES == 3
+    runner.host("run1.planner", "frontier", ["--answer", "fix"], stage="planner_repair")
+    assert "PPT_MASTER_PAGE_FILE" not in seen[-1]["env"]  # only page sessions carry the guard
+
+
+def test_codex_notes_say_the_pptm_tools_write_despite_the_read_only_sandbox():
+    import cli_host
+    codex, claude = cli_host.cli_notes("codex"), cli_host.cli_notes("claude")
+    assert "read-only" in codex and "write_file and edit_file tools do write" in codex and "never stop" in codex
+    assert "read-only" not in claude

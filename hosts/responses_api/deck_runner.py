@@ -292,6 +292,18 @@ def revision_message(stem: str, comments: list[dict]) -> str:
             f"reviewer for the new revision, and record the outcome again with `note`. Then reply `DONE {stem} <outcome>`.\n\n{listing}")
 
 
+AUTHOR_NO_PAGE_RETRIES = 2  # continuations of a page session that ended without writing its page (a failed call; the spec's retry cap)
+
+
+def no_page_message(project: Path, stem: str) -> str:
+    rel = (project / "svg_output" / f"{stem}.svg").relative_to(ROOT).as_posix() if (project / "svg_output").resolve().is_relative_to(ROOT) \
+        else str(project / "svg_output" / f"{stem}.svg")
+    return (f"Your session ended but `{rel}` does not exist, so the page has not been authored. You can write it: the pptm tools write_file and "
+            "edit_file write to the repository. A sandbox or permission notice from your own environment (for example \"read-only\") covers only "
+            "that environment's shell and patch tools, which you do not use. Write the page now under exactly that name, then carry on with the "
+            f"workflow in your task: render, clear what the lint reports, ask the reviewer, record the outcome with `note`, and reply `DONE {stem} <outcome>`.")
+
+
 def keep_or_restore(before: dict, after: dict) -> str:
     """A repair must not demote a page that had passed. `before` and `after` are the page's journal entries around the repair.
     'fine' - still accepted; 'keep' - the repaired revision stays and stays accepted, because its review found no defect (polish only);
@@ -859,6 +871,9 @@ class Runner:
                "PPT_MASTER_TELEMETRY_FILE": str(self.telemetry_path)}
         env.pop("PPT_MASTER_STATELESS", None)
         env.pop("PPT_MASTER_PROVIDER", None)
+        env.pop("PPT_MASTER_PAGE_FILE", None)
+        if page:  # a page session may write only its own page (host._own_page_only)
+            env["PPT_MASTER_PAGE_FILE"] = str(self.project / "svg_output" / f"{page}.svg")
         if author.get("provider"):
             env["PPT_MASTER_PROVIDER"] = json.dumps(author["provider"])
         env.update(self.reviewer_env(tier))
@@ -935,6 +950,14 @@ class Runner:
         started = time.time()
         self.say(f"P{page['number']:02d} {page['stem']}: {tier} author ({self.authors[tier]['model']}) started")
         code = self.host(session, tier, ["--task-file", str(task)], stage="escalation" if suffix else "page", page=page["stem"])
+        page_file = self.project / "svg_output" / f"{page['stem']}.svg"
+        for attempt in range(1, AUTHOR_NO_PAGE_RETRIES + 1):
+            if page_file.is_file():
+                break
+            # A session that ends without its page is a failed call, continued in place (at most two retries). Campaign round 2: Luna read
+            # Codex's read-only sandbox notice as "cannot write" and stopped after a few reads on 3 of 9 pages.
+            self.say(f"P{page['number']:02d} {page['stem']}: session ended without its page; continuing it ({attempt}/{AUTHOR_NO_PAGE_RETRIES})")
+            code = self.host(session, tier, ["--answer", no_page_message(self.project, page["stem"])], stage="page_retry", page=page["stem"])
         entry = self.journal_page(page["stem"])
         self.say(f"P{page['number']:02d} {page['stem']}: {entry.get('outcome') or 'no outcome'} "
                  f"(review {(entry.get('review') or {}).get('verdict')}, {entry.get('revisions', 0)} revisions, {time.time() - started:.0f}s, exit {code})")

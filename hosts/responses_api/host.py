@@ -126,8 +126,22 @@ def tool_read_file(path: str, start: int = 1, end: int | None = None) -> str:
     return chunk[:MAX_TOOL_OUTPUT] + ("\n...[truncated]" if len(chunk) > MAX_TOOL_OUTPUT else "")
 
 
+def _own_page_only(target: Path, path: str) -> None:
+    """A page session (PPT_MASTER_PAGE_FILE, set by the runner) writes one page: its own. Any other SVG under svg_output/ is refused with
+    the right name, so a drifted name cannot orphan the page (campaign Q4-r2 P04 wrote `04_gpt_6_luna_high_workhorse_...` for
+    `04_gpt_6_luna_high_cut_workhorse_...`, and the run shipped without the planned page)."""
+    own = os.environ.get("PPT_MASTER_PAGE_FILE")
+    if not own or target.suffix.lower() != ".svg" or target.parent.name != "svg_output":
+        return
+    own_path = _inside(own)
+    if target != own_path:
+        raise ValueError(f"this session authors one page, `{own_path.relative_to(ROOT).as_posix()}` (that exact name); `{path}` is not it. "
+                         "Write and edit your page under that name.")
+
+
 def tool_write_file(path: str, content: str) -> str:
     target = _inside(path)
+    _own_page_only(target, path)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
     return f"wrote {len(content)} characters to {target.relative_to(ROOT)}"
@@ -136,6 +150,7 @@ def tool_write_file(path: str, content: str) -> str:
 def tool_edit_file(path: str, old: str, new: str) -> str:
     """Exact replacement of one unique passage: a local revision never re-sends the whole page."""
     target = _inside(path)
+    _own_page_only(target, path)
     text = target.read_text(encoding="utf-8")
     count = text.count(old)
     if count != 1:

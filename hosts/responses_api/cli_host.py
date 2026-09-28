@@ -77,7 +77,9 @@ def cli_notes(backend: str) -> str:
               "it at once and need not call read_image for it; read_image likewise returns the image in its result. ")
     if backend == "codex":
         images += ("Do not use a shell, apply_patch or any tool other than the pptm tools. If an image you expected is not visible in a tool "
-                   "result, open its `IMAGE:` path with your image viewer (view_image). ")
+                   "result, open its `IMAGE:` path with your image viewer (view_image). Your environment reports its sandbox as read-only: that "
+                   "covers only its own shell and patch tools. The pptm write_file and edit_file tools do write to the repository, and they are "
+                   "how you create and revise files; never stop because you think you cannot write - call write_file. ")
     return host.host_notes(tools, images)
 
 
