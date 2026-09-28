@@ -15,6 +15,10 @@ BLOCKERS (the page is not ready for the reviewer)
                   the text is a tether or a connector attaching, and is fine)
   TIGHT_LEADING   a multi-line text set under the line-spacing floor of consulting-typesetting.md (body 1.28 x, heading 1.15 x, title 1.10 x)
   BAR_WITHOUT_LABEL  on a Gantt (six or more thin wide bars) a bar with no text on it or right beside it
+  TIMELINE_HAND_EDITED  (flagged) a chart timeline_layout.py wrote into the page (`<g data-layout="timeline_layout">`) whose
+                  markup no longer matches its data-output-sha: someone moved its bars, markers or labels by hand
+  TIMELINE_NOT_FROM_HELPER  (flagged) a Gantt (six or more thin wide bars at staggered starts, under a time ruler) that
+                  timeline_layout.py did not write: lay it out with `timeline_layout.py spec.json --into <page>`
   TEXT_OFF_SHAPE  light text runs past the edge of its dark shape onto the light page (invisible), or
                   text crosses the border of a framed box
   SHAPE_ON_TEXT   a small shape (a badge, a marker) sits on a text line that is not its own label
@@ -137,6 +141,7 @@ JS_EXTRACT = r"""
   out.images = [...svg.querySelectorAll('image,use,foreignObject')].filter(el => !inDefs(el) && opacity(el) >= 0.08)
     .map(el => ({rect: R(el.getBoundingClientRect()), ctx: ctx(el), id: el.id || null})).filter(i => i.rect[2] - i.rect[0] > 1 && i.rect[3] - i.rect[1] > 1);
   out.pageRole = svg.getAttribute('data-pptx-page-role') || null;
+  out.timelineGroups = svg.querySelectorAll('g[data-layout="timeline_layout"]').length;
   return out;
 }
 """
@@ -273,6 +278,31 @@ class Pixels:
         histogram = self.image.crop(box).histogram()
         total = sum(histogram)
         return sum(histogram[200:]) / total if total else None
+
+
+TIME_TICK = re.compile(r"(?i)^(?:w|wk|week|m|mo|month|q|sprint|s|day|d|fy|h)\s?-?\d{1,3}$|^q[1-4](?:\s*(?:fy)?\s*'?\d{2,4})?$"
+                       r"|^(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?(?:\s*'?\d{2,4})?$|^(?:19|20)\d{2}$|^fy\s*'?\d{2,4}$")
+
+
+def gantt_like(bars: list[dict], texts: list[dict]) -> bool:
+    """A Gantt, not a bar chart or a row of chips: six or more painted bars (BAR_WITHOUT_LABEL's test) that start at three or
+    more different places, in three or more rows, under a time ruler: three or more short texts like W5, M3, Q2, Jan, 2027, or a
+    row of five or more bare numbers rising left to right (a week ruler written 2 4 6 8 ...)."""
+    if len(bars) < 6:
+        return False
+    starts = {round(b["rect"][0] / 6) for b in bars}
+    rows = {round(b["rect"][1] / 6) for b in bars}
+    if len(starts) < 3 or len(rows) < 3:
+        return False
+    if sum(1 for t in texts if TIME_TICK.match((t.get("text") or "").strip())) >= 3:
+        return True
+    numbers: dict[int, list[tuple[float, int]]] = {}
+    for t in texts:
+        for line in t.get("lines") or []:
+            value = (line.get("text") or "").strip()
+            if value.isdigit() and len(value) <= 3:
+                numbers.setdefault(round((line["rect"][1] + line["rect"][3]) / 6), []).append((line["rect"][0], int(value)))
+    return any(len(row) >= 5 and len({n for _, n in row}) == len(row) and [n for _, n in sorted(row)] == sorted(n for _, n in row) for row in numbers.values())
 
 
 def analyse(geometry: dict, png_bytes: bytes | None = None, content_area=None, is_cover: bool = False, page: dict | None = None) -> list[dict]:
@@ -421,6 +451,13 @@ def analyse(geometry: dict, png_bytes: bytes | None = None, content_area=None, i
             if not named:
                 add("BAR_WITHOUT_LABEL", "blocker", bar["rect"], f"bar {bar['id'] or '#' + str(bar['index'])} ({right - left:.0f} px wide) has no label on it or beside it: "
                     "name every bar where it is - inside when it fits, otherwise starting 6 px after its end (consulting-typesetting.md §6)", bar["waiver"])
+
+    # TIMELINE_NOT_FROM_HELPER: a Gantt drawn without timeline_layout.py (only when the measurement says whether the page holds one)
+    if geometry.get("timelineGroups") == 0 and gantt_like(bars, texts):
+        box = [min(b["rect"][0] for b in bars), min(b["rect"][1] for b in bars), max(b["rect"][2] for b in bars), max(b["rect"][3] for b in bars)]
+        add("TIMELINE_NOT_FROM_HELPER", "blocker", box, f"this Gantt ({len(bars)} bars under a time ruler) was not laid out by timeline_layout.py: write its spec and run "
+            "`timeline_layout.py <spec.json> --into <project>/svg_output/<page>.svg` - it places every bar, marker and label on the scale and lists any collision; "
+            "to change the chart, edit the spec and run it again (consulting-typesetting.md §6)")
 
     # MIN_TYPE, TITLE_*, and DEAD_BAND / UNDERFILLED / HUDDLED: only when the caller gives the page's context (lint_page always does)
     if page is not None:
@@ -1335,6 +1372,43 @@ def folio_issues(geometry: dict, stem: str) -> list[dict]:
              "message": f"the page number in the footer reads {value}, but this is page {expected} (from the file name): set the folio to {expected}"}]
 
 
+def timeline_issues(svg: Path, geometry: dict | None = None, project: Path | None = None) -> list[dict]:
+    """TIMELINE_HAND_EDITED (flagged): a chart that timeline_layout.py wrote into the page carries the hash of the markup it wrote
+    (data-output-sha); the markup is hashed again here, normalised the same way, and a mismatch means its bars, markers or labels
+    were moved by hand - in T4b an author ran the helper, then made 55 coordinate edits that left a decision label on the ruler.
+    A spec edited after the chart was written is a note (run the helper again)."""
+    try:
+        text = svg.read_bytes().decode("utf-8", errors="replace")
+    except OSError:
+        return []
+    if 'data-layout="timeline_layout"' not in text and "data-layout='timeline_layout'" not in text:
+        return []
+    import hashlib
+    import timeline_layout
+    findings = []
+    for group in timeline_layout.find_groups(text, layout=timeline_layout.LAYOUT_ATTR):
+        attrs = group["attrs"]
+        gid, spec_ref = attrs.get("id") or "timeline", attrs.get("data-spec") or "its spec"
+        rect = [0, 0, 0, 0]
+        if geometry:
+            boxes = [p["rect"] for t in geometry.get("texts") or [] if gid in (t.get("groups") or []) for p in t["parts"]]
+            boxes += [s["rect"] for s in (geometry.get("shapes") or []) + (geometry.get("lines") or []) if gid in (s.get("groups") or []) and s.get("rect")]
+            if boxes:
+                rect = [min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes)]
+        if timeline_layout.group_digest(group["inner"]) != attrs.get("data-output-sha"):
+            findings.append({"kind": "TIMELINE_HAND_EDITED", "severity": "blocker", "hard": False, "rect": rect,
+                             "message": f"the timeline (#{gid}) was edited by hand after timeline_layout.py placed it: change its spec ({spec_ref}) "
+                                        f"and run the helper again with --into (timeline_layout.py {spec_ref} --into <project>/svg_output/{svg.name}) - "
+                                        "never move its bars, markers or labels by editing coordinates"})
+            continue
+        spec_path = (project / spec_ref) if project and attrs.get("data-spec") else None
+        if spec_path is not None and spec_path.is_file() and attrs.get("data-spec-sha"):
+            if hashlib.sha256(spec_path.read_bytes()).hexdigest() != attrs["data-spec-sha"]:
+                findings.append({"kind": "TIMELINE_STALE", "severity": "note", "hard": False, "rect": rect,
+                                 "message": f"the timeline's spec ({spec_ref}) changed after the chart was written: run timeline_layout.py {spec_ref} --into again"})
+    return findings
+
+
 def stop_contract(handle: dict) -> None:
     """Abandon a started check (the render failed first): stop both background processes and leave nothing behind."""
     import shutil
@@ -1458,6 +1532,7 @@ def lint_page(project: Path, stem: str, *, contract: bool = True, write_overlay:
         for _, geometry, png in measure([svg], browser=browser):
             findings = analyse(geometry, png, _content_area(project), is_cover="cover" in stem.lower(), page=page_context(project, stem, geometry))
             findings.extend(folio_issues(geometry, stem))
+            findings.extend(timeline_issues(svg, geometry, project))
             if contract_handle is not None:
                 findings.extend(finish_contract(contract_handle))
                 contract_handle = None
@@ -1505,6 +1580,7 @@ def main() -> int:
     if args.files:
         for svg, geometry, png in measure([Path(f) for f in args.files]):
             findings = analyse(geometry, png, _content_area(svg.parent.parent), is_cover="cover" in svg.stem.lower(), page=page_context(svg.parent.parent, svg.stem, geometry))
+            findings.extend(timeline_issues(svg, geometry, svg.parent.parent))
             result = {"page": f"{svg.parent.parent.name}/{svg.stem}", "blockers": [f for f in findings if f["severity"] == "blocker"],
                       "waived": [f for f in findings if f["severity"] == "waived"], "notes": [f for f in findings if f["severity"] == "note"], "overlay": None}
             print(json.dumps(result) if args.json else render_text(result))

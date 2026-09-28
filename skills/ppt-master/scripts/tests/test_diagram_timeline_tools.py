@@ -1,6 +1,7 @@
 """Diagram and timeline tools (failure families F04 and F05): the diagram lint rules, the diagram contract's delivery to authors and
 reviewers, the ELK diagram layout helper, the Gantt layout helper and the elbow connectors made at export. No model is called."""
 
+import hashlib
 import json
 import os
 import shutil
@@ -206,6 +207,186 @@ def test_tick_labels_are_thinned_until_none_collide():
     scale = timeline_layout.Scale(1, 51, 250, 980)
     step, ticks = timeline_layout.thin_ticks(scale, "week", "W", 14, "Segoe UI")
     assert step > 1 and all(b["rect"][0] - a["rect"][2] >= 8 for a, b in zip(ticks, ticks[1:]))
+
+
+# ------------------------------------------------------------------ timeline written into the page (F05 cycle 3, T4b evidence)
+
+PAGE = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720">\r\n<g id="chrome" data-pptx-role="chrome"><rect width="1280" height="720" fill="#FFFFFF"/></g>\r\n'
+        '<g id="heading"><text x="68" y="112" font-size="32">A plan</text></g>\r\n<g id="reading-line"><text x="58" y="690" font-size="16">Week 1 is assumed.</text></g>\r\n</svg>\r\n')
+
+
+def _t4b_spec() -> dict:
+    """The T4b page 08 plan (campaign 2026-09-29, record t4b_record_p08.md): five overlapping workstreams, a presentations lane, five
+    City decisions, five deliverables and the August 1 deadline one day past week 51, in the 1118 x 428 px body it had."""
+    def lane(lane_id, label, bars):
+        return {"id": lane_id, "label": label, "bars": [{"id": b[0], "start": b[1], "end": b[2], "label": b[3], **(b[4] if len(b) > 4 else {})} for b in bars]}
+
+    return {"region": {"x": 58, "y": 182, "w": 1118, "h": 428}, "horizon": {"unit": "week", "start": 1, "end": 51, "prefix": "W"},
+            "font": {"family": "'Century Gothic', Arial, sans-serif"}, "lane_label_w": 188,
+            "lanes": [lane("A", "A Mobilize and manage", [("kickoff", 1, 3, "Kickoff"), ("status", 1, 51, "Officer decisions and status"), ("handover", 49, 51, "Handover")]),
+                      lane("B", "B Listen and baseline", [("inventory", 2, 12, "Inventory"), ("interviews", 6, 25, "Interviews and workshops"), ("maturity", 18, 29, "Maturity and gaps")]),
+                      lane("C", "C Information and safeguards", [("kpi", 12, 28, "KPI and report design"), ("equity", 18, 36, "Equity and privacy screens"), ("evidence", 30, 34, "Evidence test")]),
+                      lane("D", "D Portfolio and funding", [("longlist", 27, 32, "Longlist"), ("scoring", 28, 37, "Scoring"), ("briefs", 34, 41, "Three briefs and costs")]),
+                      lane("E", "E Write and transfer", [("draft1", 39, 44, "Draft 1", {"kind": "deliverable"}), ("comments", 45, 46, "City comments"), ("draft2", 47, 49, "Draft 2"), ("final", 50, 51, "Final")]),
+                      lane("P", "Presentations", [("p12", 12, 12, "Council framing"), ("p25", 25, 25, "Board findings"), ("p37", 37, 37, "Community options"),
+                                                  ("p45", 45, 45, "Council draft"), ("p50", 50, 50, "Board revised plan")])],
+            "gates": [{"at": 2, "label": "W2 delegates and slots", "through": "A"}, {"at": 23, "label": "W23 inventory verified", "through": "B"},
+                      {"at": 28, "label": "W28 scoring, privacy", "through": "D"}, {"at": 34, "label": "W34 evidence pass/fail", "through": "D"},
+                      {"at": 41, "label": "W41 cost challenge", "through": "D"}],
+            "deadlines": [{"at": 51.29, "label": "Aug 1, 2023 - latest first draft"}],
+            "milestones": [{"at": 29, "label": "Analysis and gaps"}, {"at": 37, "label": "Shortlist"}, {"at": 44, "label": "Complete draft 1", "emphasis": True},
+                           {"at": 49, "label": "Draft 2"}, {"at": 51, "label": "Final plan"}],
+            "dependencies": [{"from": "kpi", "to": "evidence"}]}
+
+
+def _project_page(tmp_path: Path) -> Path:
+    page = tmp_path / "proj" / "svg_output" / "08_plan.svg"
+    page.parent.mkdir(parents=True)
+    page.write_bytes(PAGE.encode("utf-8"))
+    return page
+
+
+def _run_into(spec: dict, page: Path, spec_file: Path) -> int:
+    spec_file.write_text(json.dumps(spec), encoding="utf-8")
+    return timeline_layout.main([str(spec_file), "--into", str(page)])
+
+
+def test_the_t4b_plan_fits_its_body_with_no_collision_left():
+    placed = timeline_layout.layout(_t4b_spec())
+    assert placed["fits"] and placed["checks"] == []
+    assert placed["scale"]["extended_to"] == 52 and len(placed["deadlines"]) == 1
+    rows = {lane["id"]: lane["rows"] for lane in placed["lanes"]}
+    assert rows["P"] == 2  # "Community options" moves to its bar's left, "Council draft" and "Board revised plan" no longer need a third row
+
+
+def test_into_inserts_one_group_then_replaces_it_byte_for_byte(tmp_path):
+    page = _project_page(tmp_path)
+    spec = _t4b_spec()
+    assert _run_into(spec, page, tmp_path / "spec.json") == 0
+    text = page.read_bytes().decode("utf-8")
+    groups = timeline_layout.find_groups(text, layout="timeline_layout")
+    assert len(groups) == 1 and groups[0]["attrs"]["id"] == "timeline"
+    # everything else in the page is untouched, CRLF line ends included; the group sits just before </svg>
+    assert text[:groups[0]["start"]] + text[groups[0]["end"]:] == PAGE.replace("</svg>\r\n", "\n</svg>\r\n")
+    saved = page.with_name("08_plan.timeline.json")
+    attrs = groups[0]["attrs"]
+    assert attrs["data-spec"] == "svg_output/08_plan.timeline.json" and saved.is_file()
+    assert attrs["data-spec-sha"] == hashlib.sha256(saved.read_bytes()).hexdigest()
+    assert attrs["data-output-sha"] == timeline_layout.group_digest(groups[0]["inner"])
+    first = page.read_bytes()
+    assert timeline_layout.main([str(saved), "--into", str(page)]) == 0  # again, from the kept spec: the same bytes
+    assert page.read_bytes() == first
+    spec["lanes"][0]["bars"][0]["label"] = "Kick-off"  # an edited spec replaces the group, and only the group
+    _run_into(spec, page, tmp_path / "spec.json")
+    text2 = page.read_bytes().decode("utf-8")
+    groups2 = timeline_layout.find_groups(text2, layout="timeline_layout")
+    assert len(groups2) == 1 and ">Kick-off<" in groups2[0]["inner"] and ">Kickoff<" not in groups2[0]["inner"]
+    assert text2[:groups2[0]["start"]] == text[:groups[0]["start"]] and text2[groups2[0]["end"]:] == text[groups[0]["end"]:]
+
+
+def test_the_emitted_group_is_deterministic_and_its_hash_ignores_reindenting():
+    spec = _t4b_spec()
+    one = timeline_layout.page_group(timeline_layout.layout(spec), spec, "timeline", "timeline", "svg_output/x.timeline.json", "0" * 64)
+    two = timeline_layout.page_group(timeline_layout.layout(json.loads(json.dumps(spec))), spec, "timeline", "timeline", "svg_output/x.timeline.json", "0" * 64)
+    assert one == two
+    inner = timeline_layout.find_groups(one, group_id="timeline")[0]["inner"]
+    assert timeline_layout.group_digest(inner) == timeline_layout.group_digest(inner.replace("\n", "\r\n    "))
+    assert timeline_layout.group_digest(inner) != timeline_layout.group_digest(inner.replace('y="', 'y="1', 1))
+
+
+def test_a_hand_edit_inside_the_group_is_flagged_and_a_changed_spec_is_noted(tmp_path):
+    page = _project_page(tmp_path)
+    _run_into(_t4b_spec(), page, tmp_path / "spec.json")
+    project = page.parent.parent
+    assert page_lint.timeline_issues(page, None, project) == []
+    text = page.read_bytes().decode("utf-8")
+    bar = text.index('<rect id="timeline-bar-kickoff" x="')
+    start = bar + len('<rect id="timeline-bar-kickoff" x="')
+    edited = text[:start] + "261" + text[text.index('"', start):]  # one coordinate moved, as T4b's author did 55 times
+    page.write_bytes(edited.encode("utf-8"))
+    found = page_lint.timeline_issues(page, None, project)
+    assert [f["kind"] for f in found] == ["TIMELINE_HAND_EDITED"] and found[0]["severity"] == "blocker" and not found[0]["hard"]
+    assert "svg_output/08_plan.timeline.json" in found[0]["message"] and "--into" in found[0]["message"]
+    page.write_bytes(text.encode("utf-8"))
+    saved = page.with_name("08_plan.timeline.json")
+    saved.write_text(saved.read_text(encoding="utf-8").replace("Kickoff", "Kick-off"), encoding="utf-8")
+    assert [(f["kind"], f["severity"]) for f in page_lint.timeline_issues(page, None, project)] == [("TIMELINE_STALE", "note")]
+
+
+def test_a_deadline_past_the_horizon_extends_the_scale_and_is_named_at_its_line():
+    spec = {"region": {"x": 60, "y": 150, "w": 1160, "h": 400}, "horizon": {"unit": "week", "start": 1, "end": 26},
+            "lanes": [{"id": "A", "label": "Build", "bars": [{"id": "a", "start": 1, "end": 26, "label": "Build and test"}]}],
+            "deadlines": [{"at": 27.5, "label": "Board date"}]}
+    placed = timeline_layout.layout(spec)
+    scale = placed["scale"]
+    assert scale["end"] == 26 and scale["extended_to"] == 28  # "end" convention: at 27.5 is x(28.5), inside week 28
+    d = placed["deadlines"][0]
+    assert abs(d["x"] - (scale["x0"] + 27.5 * scale["unit_w"])) < 0.02 and d["x"] <= 1220
+    assert d["rect"][1] >= 150 and d["rect"][2] <= 1220 and placed["checks"] == []
+    defs, children = timeline_layout.svg_parts(placed, spec, "tl")
+    svg = "\n".join(children)
+    assert 'id="tl-deadline-0"' in svg and ">Board date<" in svg and 'id="tl-extension"' in svg
+    assert placed["bars"][0]["x1"] < d["x"]
+    with pytest.raises(timeline_layout.TimelineError):
+        timeline_layout.layout({**spec, "deadlines": [{"at": -3, "label": "Too early"}]})
+
+
+def test_the_tick_row_is_reserved_and_the_check_names_a_label_that_crowds_it():
+    placed = timeline_layout.layout(_t4b_spec())
+    ticks = placed["ticks"]
+    for name, rect in timeline_layout.label_rects(placed):
+        if not name.startswith("tick "):
+            assert all(not timeline_layout._overlap(rect, t["rect"], timeline_layout.TICK_CLEAR) for t in ticks), name
+    # T4b: "W41 cost challenge" set on the ruler row by hand
+    gate = placed["gates"][-1]
+    tick = ticks[-1]
+    gate["rect"] = [tick["rect"][0] - 150, tick["rect"][1] - 2, tick["rect"][0] - 1, tick["rect"][3] - 2]
+    assert any(c.startswith("gate 'W41 cost challenge' comes within 4 px of tick") for c in timeline_layout.checks(placed))
+
+
+def test_labels_on_one_row_keep_8_px_and_a_label_switches_side_to_save_a_row():
+    placed = timeline_layout.layout(_t4b_spec())
+    rects = timeline_layout.label_rects(placed)
+    for i, (_, a) in enumerate(rects):
+        for _, b in rects[i + 1:]:
+            if min(a[3], b[3]) - max(a[1], b[1]) > 0.5 * min(a[3] - a[1], b[3] - b[1]):
+                assert max(b[0] - a[2], a[0] - b[2]) >= 8 - 0.01
+    # T4b: "Community options" and "Council draft" 3 px apart on one row
+    bars = {b["id"]: b for b in placed["bars"]}
+    council = bars["p45"]["text"]
+    bars["p37"]["text"]["rect"] = [council["rect"][0] - 100, council["rect"][1], council["rect"][0] - 3, council["rect"][3]]
+    assert "bar label 'Council draft' and bar label 'Community options' are 3.0 px apart on one row (8 px minimum)" in timeline_layout.checks(placed)
+    # three one-week bars whose right-hand labels would each need a row of their own share two when one label moves left
+    def bar(i, x0, label_w):
+        right = {"where": "right", "lines": ["x"], "w": label_w, "x": x0 + 18 + 6}
+        left = {"where": "left", "lines": ["x"], "w": label_w, "x": x0 - 6 - label_w}
+        return {"id": i, "x0": x0, "x1": x0 + 18, "_options": [right, left]}
+    rows = timeline_layout.pack_rows([bar("a", 400, 130), bar("b", 500, 90), bar("c", 560, 120)])
+    assert len(rows) == 2 and sum(1 for row in rows for b in row if b["text"]["where"] == "left") == 1
+
+
+def test_a_gantt_not_drawn_by_the_helper_is_flagged_and_a_bar_chart_is_not(monkeypatch):
+    monkeypatch.setattr(page_lint, "text_lines", lambda text: text["lines"])
+    bars = [_box(i, [300 + 60 * i, 200 + 30 * i, 420 + 60 * i, 218 + 30 * i], framed=False, fill="rgb(31, 90, 138)") for i in range(6)]
+    labels = [_text(10 + i, [426 + 60 * i, 201 + 30 * i, 480 + 60 * i, 217 + 30 * i], f"Task {i}") for i in range(6)]
+    ticks = [_text(30 + k, [300 + 100 * k, 170, 324 + 100 * k, 186], f"W{1 + 4 * k}") for k in range(5)]
+
+    def kinds(shapes, texts, groups):
+        geometry = {"canvas": [1280, 720], "texts": texts, "shapes": shapes, "lines": []}
+        if groups is not None:
+            geometry["timelineGroups"] = groups
+        return [f for f in page_lint.analyse(geometry) if f["kind"].startswith("TIMELINE")]
+
+    found = kinds(bars, labels + ticks, 0)
+    assert [f["kind"] for f in found] == ["TIMELINE_NOT_FROM_HELPER"] and found[0]["severity"] == "blocker" and not found[0]["hard"]
+    assert kinds(bars, labels + ticks, 1) == [] and kinds(bars, labels + ticks, None) == []
+    chart = [_box(i, [300, 200 + 30 * i, 420 + 60 * i, 218 + 30 * i], framed=False, fill="rgb(31, 90, 138)") for i in range(6)]  # one baseline
+    assert kinds(chart, labels + ticks, 0) == []
+    assert kinds(bars, labels, 0) == []  # no time ruler: steps or chips, not a plan
+    numbers = [_text(40 + k, [300 + 60 * k, 170, 312 + 60 * k, 186], str(2 + 2 * k)) for k in range(6)]  # a ruler written 2 4 6 ... (Meridian)
+    assert [f["kind"] for f in kinds(bars, labels + numbers, 0)] == ["TIMELINE_NOT_FROM_HELPER"]
+    shuffled = [_text(40 + k, [300 + 60 * k, 170, 312 + 60 * k, 186], str(n)) for k, n in enumerate((5, 2, 9, 1, 7, 3))]
+    assert kinds(bars, labels + shuffled, 0) == []
 
 
 # -------------------------------------------------------------------------------------------------------- diagram layout
