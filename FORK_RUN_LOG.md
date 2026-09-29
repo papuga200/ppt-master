@@ -516,7 +516,7 @@ Tests: 31 pass.
 **Run A: Claude subscription, Opus 5.5 high in every role.**
 - 88.4 min; 16 slides, 15 accepted.
 - Parity 15 -> 0; consistency 0.
-- 334 calls; USD 91.15 notional (billed 0); about 16% of the Claude five-hour window.
+- 334 calls; USD 51.80 notional (billed 0); about 16% of the Claude five-hour window.
 - Meets the frozen criteria: every dimension 3 at deck level; the price reconciles exactly by grade and by workstream; dates, placeholders and pilot evaluation all check.
 - Notes: P12's title is cut short; P13's grade headers are offset from their bar segments.
 
@@ -530,4 +530,4 @@ Tests: 31 pass.
 1. The fork produces a client-grade 16-slide proposal from an RFP, unassisted, on a subscription route.
 2. Accuracy, consistency and export fidelity now hold on both routes. The remaining gap between routes is persuasive planning and writing.
 3. The per-page "wall" column in the runner summary spans a page's first to last session, including deck repair. It overstates page time; use `run_report.py` for stage times.
-4. Opus cost is dominated by resumed long sessions: deck repair and planner repair are 42% of Run A's notional cost.
+4. Claude-route cost telemetry double-counts resumed sessions. `cli_host.py` stores Claude's cumulative `total_cost_usd` as the call's cost, so the runner reported USD 91.15 for Run A; the true figure is 51.80, and token counts are right. With that corrected, Opus cost is output and thinking (44% output, 75% of it reasoning); repairs are about 11%.
