@@ -1713,9 +1713,27 @@ class Runner:
                 written += 1
         return written
 
+    def set_aside_strays(self) -> list[str]:
+        """Only planned pages are the deck. Any other SVG in svg_output/ (a helper's preview, a scratch copy, a page written under a drifted
+        name) moves to `.stray/` and is named in the log: campaign Q1-r2 shipped a `07_tl_preview.svg` a timeline run left there as slide 8."""
+        spec = self.project / "design_spec.md"
+        folder = self.project / "svg_output"
+        if not spec.is_file() or not folder.is_dir():
+            return []
+        planned = {p["stem"] for p in parse_pages(spec.read_text(encoding="utf-8"))}
+        strays = sorted(p for p in folder.glob("*.svg") if p.stem not in planned)
+        if planned and strays:
+            aside = self.project / ".stray"
+            aside.mkdir(exist_ok=True)
+            for svg in strays:
+                svg.replace(aside / svg.name)
+            self.say("set aside, not in the plan: " + ", ".join(p.name for p in strays) + " -> .stray/")
+        return [p.name for p in strays] if planned else []
+
     def export(self, outstanding: dict[str, list[str]] | None = None) -> Path | None:
         """Export the deck. With checker issues still outstanding after the repair budget, export anyway through the exporter's
         own override: it normalises what it can and still runs the strict converter, so a page that cannot be converted fails loudly."""
+        self.set_aside_strays()
         self.script("finalize_svg.py", str(self.project))
         notes = self.write_notes()
         flags = (["--enable-dangerous-nonconforming-svg-export"] if outstanding else [])
@@ -1948,6 +1966,7 @@ class Runner:
             jobs.append(lambda: self.after_author(anchor, anchor))
         with self.stage("pages", count=len(pages)):
             self.fan_out(jobs)  # each page runs author -> its checker repairs -> escalation on its own, not in lock-step with the others
+        self.set_aside_strays()  # the deck checker, consistency and the deck review see the planned pages only
 
         by_stem = {p["stem"]: p for p in pages}
         with self.stage("deck_checker") as checker_info:

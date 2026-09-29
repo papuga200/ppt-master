@@ -743,3 +743,17 @@ def test_codex_notes_say_the_pptm_tools_write_despite_the_read_only_sandbox():
     codex, claude = cli_host.cli_notes("codex"), cli_host.cli_notes("claude")
     assert "read-only" in codex and "write_file and edit_file tools do write" in codex and "never stop" in codex
     assert "read-only" not in claude
+
+
+def test_only_planned_pages_stay_in_svg_output(tmp_path, monkeypatch):
+    deck_runner, runner = _runner(tmp_path)
+    (runner.project / "design_spec.md").write_text("spec", encoding="utf-8")
+    monkeypatch.setattr(deck_runner, "parse_pages", lambda text: [{"stem": "01_cover"}, {"stem": "07_pilot"}])
+    out = runner.project / "svg_output"
+    out.mkdir()
+    for name in ("01_cover.svg", "07_pilot.svg", "07_tl_preview.svg", "07_pilot.timeline.json"):
+        (out / name).write_text("x", encoding="utf-8")
+    assert runner.set_aside_strays() == ["07_tl_preview.svg"]
+    assert sorted(p.name for p in out.iterdir()) == ["01_cover.svg", "07_pilot.svg", "07_pilot.timeline.json"]
+    assert (runner.project / ".stray" / "07_tl_preview.svg").is_file()
+    assert runner.set_aside_strays() == []
