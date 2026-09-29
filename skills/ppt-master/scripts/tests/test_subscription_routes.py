@@ -341,6 +341,33 @@ def test_cli_host_claude_ceiling_is_resumable(cli_env, monkeypatch):
     assert not json.loads((out / "s2" / "state.json").read_text(encoding="utf-8"))["pending_input"]
 
 
+def test_cli_host_claude_resumed_cost_is_not_counted_twice(cli_env, monkeypatch):
+    # Claude's total_cost_usd is cumulative over the conversation: the resumed run must add only its own rise
+    cli_host, calls, fake_run, out = cli_env
+    monkeypatch.setenv("PPT_MASTER_API_BASE", "cli:claude")
+    sid = "5ed7c35e-d7dd-4f24-9efe-67c705a3b44b"
+    stream = [e for e in _lines("claude_parallel_tools.jsonl") if e["type"] != "result"]
+
+    def result(cumulative, output):
+        return {"type": "result", "subtype": "success", "is_error": False, "result": "done", "num_turns": 1, "total_cost_usd": cumulative,
+                "usage": {"input_tokens": 10, "output_tokens": output}, "modelUsage": {"claude-haiku-4-5": {}}, "session_id": sid}
+
+    monkeypatch.setattr(cli_host, "run_cli", fake_run(None, extra=[*stream, result(5.9064342, 139535)]))
+    assert cli_host.main(["--session", "s5", "--task", "plan"]) == 0
+    monkeypatch.setattr(cli_host, "run_cli", fake_run(None, extra=[*stream, result(6.3593182, 2816)]))
+    assert cli_host.main(["--session", "s5", "--answer", "repair"]) == 0
+    assert "--resume" in calls[-1]["argv"]
+    total = json.loads((out / "s5" / "state.json").read_text(encoding="utf-8"))["usage_total"]
+    assert total["cost_usd"] == pytest.approx(6.3593182) and total["output_tokens"] == 139535 + 2816
+    runs = [e["usage_run"] for e in _events(out / "s5" / "transcript.jsonl") if e.get("event") == "end"]
+    assert [r["cost_usd"] for r in runs] == pytest.approx([5.9064342, 0.452884]) and runs[1]["cost_usd_cumulative"] == 6.3593182
+    # a new task starts a new conversation, whose first cumulative figure is its own cost
+    monkeypatch.setattr(cli_host, "run_cli", fake_run(None, extra=[*stream, result(1.25, 100)]))
+    assert cli_host.main(["--session", "s5", "--task", "again"]) == 0
+    total = json.loads((out / "s5" / "state.json").read_text(encoding="utf-8"))["usage_total"]
+    assert total["cost_usd"] == pytest.approx(6.3593182 + 1.25)
+
+
 def test_cli_host_refuses_on_a_failed_preflight_or_key_billing(cli_env, monkeypatch):
     cli_host, calls, fake_run, out = cli_env
     monkeypatch.setenv("PPT_MASTER_API_BASE", "cli:claude")

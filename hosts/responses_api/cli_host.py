@@ -18,6 +18,8 @@ stop or at the call ceiling.
   the process group at the ceiling; the session is marked pending and `--resume-pending` continues it.
 - Usage per invocation comes from the CLI's own accounting (Claude's result event; Codex's rollout file) and is written to the
   `end` event as `usage_run`, with a notional cost (`subscription-notional-list-price`) - a subscription bills nothing per call.
+  Claude's `total_cost_usd` is cumulative over the conversation, so a resumed run is charged the rise since the previous result
+  (state.json `claude_cost_cumulative`); the cumulative figure is kept as `usage_run.cost_usd_cumulative`.
 - No wall-clock limit is put on the model's work (user policy).
 
 Environment: PPT_MASTER_MODEL, PPT_MASTER_EFFORT, PPT_MASTER_API_BASE (cli:claude | cli:codex), PPT_MASTER_SYSTEM_FILE,
@@ -357,6 +359,20 @@ def run_cli(argv: list[str], stdin_text: str, env: dict, stream_log: Path, stder
         return proc.wait(), stopped
 
 
+def _claude_run_cost(run: dict, state: dict, session_id: str | None, resumed: str | None) -> dict:
+    """Claude's `total_cost_usd` covers the whole conversation, so a resumed run's own cost is the rise since the last result."""
+    cumulative = run.get("cost_usd")
+    if cumulative is None:
+        return run
+    last = state.get("claude_cost_cumulative") or {}
+    previous = last.get("cost_usd") if resumed and last.get("session_id") == resumed else None
+    run["cost_usd_cumulative"] = cumulative
+    if previous is not None and cumulative >= previous:
+        run["cost_usd"] = round(cumulative - previous, 6)
+    state["claude_cost_cumulative"] = {"session_id": session_id, "cost_usd": cumulative}
+    return run
+
+
 def _add(total: dict, run: dict) -> dict:
     for key in ("input_tokens", "cached", "output_tokens", "reasoning", "calls"):
         total[key] = total.get(key, 0) + (run.get(key) or 0)
@@ -461,6 +477,7 @@ def main(argv: list[str] | None = None) -> int:
         at_ceiling = result.get("subtype") == "error_max_turns"
         failed = (not result) or (bool(result.get("is_error")) and not at_ceiling)
         state["cli_session_id"] = result.get("session_id") or state.get("cli_session_id")
+        run = _claude_run_cost(run, state, state["cli_session_id"], resumed=resume)
         unexpected = sorted(set(result.get("modelUsage") or {}) - {model})
         if unexpected:
             session.log({"event": "warning", "text": f"models other than {model} were used: {unexpected}", "at": time.time()})
