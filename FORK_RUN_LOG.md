@@ -503,3 +503,31 @@ Tests: 31 pass.
 3. A host-level read restriction between projects.
 4. Minimum type size (the user's call).
 5. Upstream attribution in the content brief.
+
+## meridian-final-a / meridian-final-b — 29 September 2026 — the optimisation campaign's two final demonstrations
+
+**Setup.**
+- Frozen commit 182c2170 on `campaign/optimization-20260929`, after ten failure families and two qualification rounds. F01 cycle 2 fixed the Luna page losses found in round 2.
+- Each run had its own detached worktree (`ppt-master-final-a` / `-b`), holding only `projects/meridian-final/sources`: the Meridian request, RFP, compliance annex, response workbook and firm knowledge base, hash-checked against the freeze.
+- Both used the curated reference library and `--brief proposal --max-parallel 4 --max-turns 40 --revision-budget 2 --repair-rounds 2 --no-escalate`.
+- The runs went one after the other, with no intervention.
+- Evidence: `ppt-master-runs/campaign-20260929/final/`: `freeze_manifest.*`, `readiness.md`, `run_a_assessment.md`, `run_b_assessment.md`, `comparison.md`, `run_*_report.md`, and the sessions.
+
+**Run A: Claude subscription, Opus 5.5 high in every role.**
+- 88.4 min; 16 slides, 15 accepted.
+- Parity 15 -> 0; consistency 0.
+- 334 calls; USD 91.15 notional (billed 0); about 16% of the Claude five-hour window.
+- Meets the frozen criteria: every dimension 3 at deck level; the price reconciles exactly by grade and by workstream; dates, placeholders and pilot evaluation all check.
+- Notes: P12's title is cut short; P13's grade headers are offset from their bar segments.
+
+**Run B: Codex subscription, GPT-6 Sol high (planning, frontier pages, reviews) and GPT-6 Luna high (workhorse pages).**
+- 90.8 min; 16 slides, 13 accepted.
+- Parity 3 -> 0; consistency 0 certain.
+- 581 calls; USD 7.41 notional (billed 0); Codex weekly window 46% -> 50%.
+- Accurate and cleanly drawn, but it does not meet the pass rule. D1 and D2 are at 2: the executive answer carries no price or direct ask, the ask is hedged ("consider ... not an award or contract"), and internal instructions leak into client copy.
+
+**What this establishes.**
+1. The fork produces a client-grade 16-slide proposal from an RFP, unassisted, on a subscription route.
+2. Accuracy, consistency and export fidelity now hold on both routes. The remaining gap between routes is persuasive planning and writing.
+3. The per-page "wall" column in the runner summary spans a page's first to last session, including deck repair. It overstates page time; use `run_report.py` for stage times.
+4. Opus cost is dominated by resumed long sessions: deck repair and planner repair are 42% of Run A's notional cost.
