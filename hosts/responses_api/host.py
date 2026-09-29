@@ -198,8 +198,10 @@ def tool_run_script(script: str, args: list[str] | None = None, timeout_s: int =
     # billed and its verdict lost (Harrowgate, 24 Sep 2026). A review or a render under load is bounded by the script itself, so the
     # author may lengthen the wait but never shorten it below this floor.
     timeout_s = max(int(timeout_s or 0), SCRIPT_TIMEOUT_FLOOR_S)
+    # stdin is empty: under the MCP tool server the host's stdin is the JSON-RPC channel, and a script reading `--input -` consumed it and
+    # froze every later tool call of the session (campaign F01-c2-a P06: `preset_shape_svg.py render-batch --input -`, ~15 min lost)
     proc = subprocess.run(
-        [str(PY), str(script_path), *safe_args], cwd=str(ROOT), env=_env_for_scripts(),
+        [str(PY), str(script_path), *safe_args], cwd=str(ROOT), env=_env_for_scripts(), stdin=subprocess.DEVNULL,
         capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout_s,
     )
     _attach_printed_images(proc.stdout)

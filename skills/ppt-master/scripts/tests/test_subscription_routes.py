@@ -757,3 +757,30 @@ def test_only_planned_pages_stay_in_svg_output(tmp_path, monkeypatch):
     assert sorted(p.name for p in out.iterdir()) == ["01_cover.svg", "07_pilot.svg", "07_pilot.timeline.json"]
     assert (runner.project / ".stray" / "07_tl_preview.svg").is_file()
     assert runner.set_aside_strays() == []
+
+
+def test_a_script_reading_stdin_cannot_swallow_the_mcp_channel(tmp_path):
+    reader = SCRIPTS / "_test_reads_stdin.py"
+    reader.write_text("import sys\nprint(f'read {len(sys.stdin.read())} characters')\n", encoding="utf-8")
+    env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+    proc = subprocess.Popen([sys.executable, str(HOSTS / "tools_mcp.py")], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            cwd=str(ROOT), env=env)
+    import threading
+    watchdog = threading.Timer(120, proc.kill)  # without the fix the script eats the next message and waits for EOF: no answer ever comes
+    watchdog.start()
+    try:
+        _rpc(proc, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                                                                                  "clientInfo": {"name": "test", "version": "0"}}})
+        for message in ({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "run_script", "arguments": {"script": reader.name, "args": ["--input", "-"]}}},
+                        {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "list_dir", "arguments": {"path": "hosts/responses_api/planner_examples"}}}):
+            proc.stdin.write((json.dumps(message) + "\n").encode("utf-8"))
+        proc.stdin.flush()
+        first, second = (json.loads(proc.stdout.readline().decode("utf-8") or "null") for _ in range(2))
+        assert first and first["id"] == 2 and "read 0 characters" in first["result"]["content"][0]["text"]
+        assert second and second["id"] == 3 and "story_calibration.md" in second["result"]["content"][0]["text"]
+    finally:
+        watchdog.cancel()
+        reader.unlink(missing_ok=True)
+        if proc.poll() is None:
+            proc.stdin.close()
+            proc.wait(timeout=30)
