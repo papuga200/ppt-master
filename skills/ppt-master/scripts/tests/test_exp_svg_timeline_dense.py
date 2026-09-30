@@ -185,7 +185,7 @@ class CapacityTest(unittest.TestCase):
             src.write_text(json.dumps(plan()), encoding="utf-8")
             self.assertEqual(bt.main(["--in", str(src), "--out", str(out)]), 0)
             receipt = json.loads(out.read_text(encoding="utf-8"))["receipt"]
-            self.assertEqual(receipt["tool_version"], "0.3.0")
+            self.assertEqual(receipt["tool_version"], bt.TOOL_VERSION)
             self.assertEqual(receipt["engine"], "exp_svg.dense_layout")
             self.assertIn("dense_layout.py", receipt["adapter_files_sha256"])
             self.assertTrue(re.fullmatch(r"[0-9a-f]{64}", receipt["output_sha256"]))
