@@ -1546,7 +1546,9 @@ class Inspector:
         out = []
         for s in self.m.closed:
             r = s["rect"]
-            if s["fill"] and G.width(r) <= 26 and G.height(r) <= 26 and G.area(r) <= 520:
+            declared = "marker" in str((s.get("data") or {}).get("data-role") or "")  # the author calls it a marker
+            if s["fill"] and ((G.width(r) <= 26 and G.height(r) <= 26 and G.area(r) <= 520)
+                              or (declared and G.width(r) <= 48 and G.height(r) <= 48)):  # e.g. an enlarged focal milestone
                 out.append({"ref": s["ref"], "rect": r, "refs": [s["ref"]], "shape": "glyph", "cid": (s.get("data") or {}).get("data-content-id")})
         for line in self.m.lines:
             if line["text"].strip() and all(ch in SYMBOLS for ch in line["text"].replace(" ", "")) and len(line["text"].strip()) <= 2:
