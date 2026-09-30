@@ -392,6 +392,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--task")
     parser.add_argument("--task-file")
     parser.add_argument("--answer")
+    # EXPERIMENT-ONLY (svg-helpers-experiment-20260930): a long repair packet cannot ride on a Windows command line (~32k chars);
+    # --answer-file resumes the same conversation exactly like --answer, with the message read from a file.
+    parser.add_argument("--answer-file")
     parser.add_argument("--max-turns", type=int, default=200)
     parser.add_argument("--max-calls", type=int, default=400, help="accepted for host.py compatibility; the CLI ceiling is --max-turns")
     parser.add_argument("--resume-pending", action="store_true")
@@ -410,6 +413,8 @@ def main(argv: list[str] | None = None) -> int:
         state["tier"] = os.environ["PPT_MASTER_TIER"]
     if args.task_file:
         args.task = Path(args.task_file).read_text(encoding="utf-8")
+    if args.answer_file:  # EXPERIMENT-ONLY, see the argument above
+        args.answer = Path(args.answer_file).read_text(encoding="utf-8")
     resume = None
     if args.task:
         message = args.task

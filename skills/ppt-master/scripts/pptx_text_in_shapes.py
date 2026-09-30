@@ -180,6 +180,24 @@ def painted(item: Item) -> bool:
     return fill or stroked
 
 
+def is_connector_like(item: Item) -> bool:
+    """A stroke with an arrowhead, or an unfilled open custom path, draws a line: text must never be moved into it."""
+    sppr = item.el.find("p:spPr", NS)
+    if sppr is None:
+        return False
+    line = sppr.find("a:ln", NS)
+    if line is not None and any((end is not None and end.get("type", "none") != "none")
+                                for end in (line.find("a:headEnd", NS), line.find("a:tailEnd", NS))):
+        return True
+    custom = sppr.find("a:custGeom", NS)
+    unfilled = sppr.find("a:noFill", NS) is not None or not any(sppr.find(f"a:{k}", NS) is not None
+                                                                  for k in ("solidFill", "gradFill", "pattFill", "blipFill"))
+    if custom is not None and unfilled:
+        paths = custom.findall("a:pathLst/a:path", NS)
+        return bool(paths) and all(p.find("a:close", NS) is None for p in paths)
+    return False
+
+
 def host_kind(item: Item, slide_area: float) -> str | None:
     """'exact' when insets from the bounds are exact, 'centred' when only centred text may go in, None when not a host."""
     if item.tag != "sp" or item.is_text or item.turned or item.scaled or not painted(item):
@@ -191,6 +209,8 @@ def host_kind(item: Item, slide_area: float) -> str | None:
     if body is not None and "".join(body.itertext()).strip():
         return None
     if item.el.find("p:nvSpPr/p:nvPr/p:ph", NS) is not None:
+        return None
+    if is_connector_like(item):  # an arrow or open stroke is never a text host (svg-helpers experiment D013)
         return None
     preset = item.el.find("p:spPr/a:prstGeom", NS)
     if preset is not None:

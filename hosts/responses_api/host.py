@@ -101,6 +101,79 @@ def _inside(path: str) -> Path:
     return resolved
 
 
+# --- EXPERIMENT-ONLY (svg-helpers-experiment-20260930, branch exp/svg-helpers-20260930; never merged to production) ----------------
+# Three opt-in guards for an isolated creator session. Each is read at call time; when its variable is unset the host behaves exactly
+# as before.
+#   PPT_MASTER_SCRIPT_ALLOWLIST  `;`-separated script paths relative to skills/ppt-master/scripts (e.g. `exp_svg/inspect/submit_check.py`).
+#                                run_script refuses any other script. Set but empty = no script may run.
+#   PPT_MASTER_READ_ROOTS        `;`-separated directories (relative to the checkout root, or absolute inside it). read_file, read_image,
+#                                list_dir and run_script's path arguments must resolve inside one of them.
+#   PPT_MASTER_WRITE_ROOTS       the same for write_file and edit_file.
+#   PPT_MASTER_GUARD_LOG         optional JSONL file: one line per refusal (who, what, why), besides the tool's own error text.
+def _env_list(name: str) -> list[str] | None:
+    raw = os.environ.get(name)
+    if raw is None:
+        return None
+    return [item.strip().replace("\\", "/") for item in raw.split(";") if item.strip()]
+
+
+def _guard_log(record: dict) -> None:
+    target = os.environ.get("PPT_MASTER_GUARD_LOG")
+    if not target:
+        return
+    try:
+        with open(target, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps({**record, "at": time.time()}, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
+def _roots(name: str) -> list[Path] | None:
+    items = _env_list(name)
+    if items is None:
+        return None
+    return [_inside(item) for item in items]
+
+
+def _check_roots(target: Path, name: str, tool: str, shown: str) -> None:
+    roots = _roots(name)
+    if roots is None:
+        return
+    if not any(target == root or root in target.parents for root in roots):
+        allowed = ", ".join(root.relative_to(ROOT).as_posix() for root in roots) or "(none)"
+        _guard_log({"event": "refused", "guard": name, "tool": tool, "path": shown})
+        raise ValueError(f"`{shown}` is outside this session's workspace; {tool} may only use paths under: {allowed}")
+
+
+def _check_script_allowed(script_rel: str) -> None:
+    allowed = _env_list("PPT_MASTER_SCRIPT_ALLOWLIST")
+    if allowed is None:
+        return
+    if script_rel not in allowed:
+        _guard_log({"event": "refused", "guard": "PPT_MASTER_SCRIPT_ALLOWLIST", "tool": "run_script", "script": script_rel})
+        raise ValueError(f"script `{script_rel}` is not on this session's script allowlist; allowed: " + (", ".join(allowed) or "(none)"))
+
+
+def _check_script_args(args: list[str]) -> None:
+    """With PPT_MASTER_READ_ROOTS set, every path-like argument (or `--flag=path` value) must stay inside the workspace."""
+    if _env_list("PPT_MASTER_READ_ROOTS") is None:
+        return
+    for item in args:
+        value = item.split("=", 1)[1] if item.startswith("-") and "=" in item else (None if item.startswith("-") else item)
+        if not value:
+            continue
+        looks_like_path = " " not in value and ("/" in value or "\\" in value or (ROOT / value).exists() or Path(value).is_absolute())
+        if not looks_like_path:
+            continue
+        try:
+            target = _inside(value)
+        except ValueError:
+            _guard_log({"event": "refused", "guard": "PPT_MASTER_READ_ROOTS", "tool": "run_script", "path": value})
+            raise
+        _check_roots(target, "PPT_MASTER_READ_ROOTS", "run_script", value)
+# --- end EXPERIMENT-ONLY ----------------------------------------------------------------------------------------------------------
+
+
 READ_DENY = [x for x in os.environ.get("PPT_MASTER_READ_DENY", "skills/ppt-master/scripts/*.py").split(";") if x]
 
 
@@ -113,6 +186,7 @@ def _read_denied(target: Path) -> bool:
 
 def tool_read_file(path: str, start: int = 1, end: int | None = None) -> str:
     target = _inside(path)
+    _check_roots(target, "PPT_MASTER_READ_ROOTS", "read_file", path)  # EXPERIMENT-ONLY guard (no-op when unset)
     if _read_denied(target):
         return "not readable by the author: this is script source. The workflow documents under skills/ppt-master (SKILL.md, workflows/, references/, scripts/docs/) say what each script does; run it with run_script."
     if target.is_dir():
@@ -141,6 +215,7 @@ def _own_page_only(target: Path, path: str) -> None:
 
 def tool_write_file(path: str, content: str) -> str:
     target = _inside(path)
+    _check_roots(target, "PPT_MASTER_WRITE_ROOTS", "write_file", path)  # EXPERIMENT-ONLY guard (no-op when unset)
     _own_page_only(target, path)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
@@ -150,6 +225,7 @@ def tool_write_file(path: str, content: str) -> str:
 def tool_edit_file(path: str, old: str, new: str) -> str:
     """Exact replacement of one unique passage: a local revision never re-sends the whole page."""
     target = _inside(path)
+    _check_roots(target, "PPT_MASTER_WRITE_ROOTS", "edit_file", path)  # EXPERIMENT-ONLY guard (no-op when unset)
     _own_page_only(target, path)
     text = target.read_text(encoding="utf-8")
     count = text.count(old)
@@ -161,6 +237,7 @@ def tool_edit_file(path: str, old: str, new: str) -> str:
 
 def tool_list_dir(path: str = ".") -> str:
     target = _inside(path)
+    _check_roots(target, "PPT_MASTER_READ_ROOTS", "list_dir", path)  # EXPERIMENT-ONLY guard (no-op when unset)
     rows = []
     for p in sorted(target.rglob("*")):
         if any(part in (".venv", ".git", "__pycache__") for part in p.parts):
@@ -185,6 +262,8 @@ def tool_run_script(script: str, args: list[str] | None = None, timeout_s: int =
         raise ValueError("only the skill's own scripts may be run")
     if not script_path.is_file():
         raise ValueError(f"no such script: {script}")
+    _check_script_allowed(script_path.relative_to(SCRIPTS).as_posix())  # EXPERIMENT-ONLY guard (no-op when unset)
+    _check_script_args([str(item) for item in args or []])  # EXPERIMENT-ONLY guard (no-op when unset)
     safe_args = []
     for item in args or []:
         if item.startswith("-"):
@@ -251,6 +330,7 @@ def _attach_printed_images(stdout: str) -> None:
 
 def tool_read_image(path: str) -> str:
     target = _inside(path)
+    _check_roots(target, "PPT_MASTER_READ_ROOTS", "read_image", path)  # EXPERIMENT-ONLY guard (no-op when unset)
     if target.suffix.lower() not in (".png", ".jpg", ".jpeg", ".webp"):
         raise ValueError("read_image takes a PNG, JPEG or WebP file")
     data = target.read_bytes()

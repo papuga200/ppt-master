@@ -54,6 +54,33 @@ def tool_list(host) -> list[dict]:
     return [{"name": t["name"], "description": t["description"], "inputSchema": t["parameters"]} for t in host.TOOLS]
 
 
+def _snapshot_svg(host, tool: str, arguments: dict) -> None:
+    """EXPERIMENT-ONLY (svg-helpers-experiment-20260930, never merged to production). When PPT_MASTER_SVG_SNAPSHOT_DIR is set, every
+    successful write_file/edit_file of an .svg copies the file as written into that directory and appends one line to its
+    snapshots.jsonl (time, tool, path, sha256, bytes, copy name), so the harness can find the first content-bearing write. The
+    directory lies outside the checkout, so the session's own tools cannot read or change it. Never raises into the tool call."""
+    folder = os.environ.get("PPT_MASTER_SVG_SNAPSHOT_DIR")
+    path = str(arguments.get("path") or "")
+    if not folder or not path.lower().endswith(".svg"):
+        return
+    try:
+        import hashlib
+        target = host._inside(path)
+        data = target.read_bytes()
+        out = Path(folder)
+        out.mkdir(parents=True, exist_ok=True)
+        index = out / "snapshots.jsonl"
+        seq = len(index.read_bytes().splitlines()) + 1 if index.is_file() else 1
+        digest = hashlib.sha256(data).hexdigest()
+        name = f"{seq:04d}_{digest[:12]}.svg"
+        (out / name).write_bytes(data)
+        record = {"seq": seq, "at": time.time(), "tool": tool, "path": target.relative_to(host.ROOT).as_posix(), "sha256": digest, "bytes": len(data), "copy": name}
+        with index.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception as exc:  # noqa: BLE001 - telemetry must never break the author's tool call
+        print(f"svg snapshot failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+
+
 def call_tool(host, name: str, arguments: dict | None) -> tuple[dict, dict]:
     """(MCP result, log record). A handler's exception becomes the host's own `error: Type: msg` text with isError set."""
     started = time.time()
@@ -67,6 +94,8 @@ def call_tool(host, name: str, arguments: dict | None) -> tuple[dict, dict]:
                 text = host.HANDLERS[name](**(arguments or {}))
         except Exception as exc:  # noqa: BLE001
             text, error = f"error: {type(exc).__name__}: {exc}", True
+    if name in ("write_file", "edit_file") and not error:
+        _snapshot_svg(host, name, arguments or {})  # EXPERIMENT-ONLY (no-op unless PPT_MASTER_SVG_SNAPSHOT_DIR is set)
     if name == "read_image" and not error:  # the host's wording is for its next-message delivery; here the image is in this result
         text = text.replace("is attached to the next message", "is shown below")
     content: list[dict] = [{"type": "text", "text": text}]
@@ -75,7 +104,8 @@ def call_tool(host, name: str, arguments: dict | None) -> tuple[dict, dict]:
         content.append({"type": "image", "data": base64.b64encode(data).decode("ascii"), "mimeType": _mime(path)})
     result = {"content": content, "isError": error}
     record = {"event": "tool", "name": name, "args": json.dumps(arguments or {}, ensure_ascii=False)[:2000], "result": text[:4000],
-              "images": [p for p, _ in images], "seconds": round(time.time() - started, 2), "error": error, "at": time.time()}
+              "images": [p for p, _ in images], "seconds": round(time.time() - started, 2), "error": error, "at": time.time(),
+              "started": started}  # EXPERIMENT-ONLY addition: the exact start, so tool intervals need not be rebuilt from rounded seconds
     return result, record
 
 
