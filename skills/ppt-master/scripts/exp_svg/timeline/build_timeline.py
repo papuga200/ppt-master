@@ -595,6 +595,9 @@ def run(request_path: Path, out_path: Path, svg_path: Path | None = None, into: 
             if request.get("bounds") in (None, "auto"):
                 request["bounds"] = dict(page_layout["region"])
             style.setdefault("header", "compact")
+            import os
+            if "timeline_rev:2" in (os.environ.get("PPT_MASTER_EXP_ENGINES") or ""):
+                style.setdefault("rev2", True)  # package B2: visible dependency connectors, lane milestones keep their marker
         elif page_path:
             raise RequestError("--page needs a `page` block in the request")
         built = build(request, group_id, engine)

@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from xml.sax.saxutils import escape
 
 ENGINE = "exp_svg.dense_layout"
-ENGINE_VERSION = "0.4.0"
+ENGINE_VERSION = "0.5.0"
 LINE = 1.3             # line height / font size for labels (the fork lint's multi-line floor is 1.28 x: TIGHT_LEADING)
 GAP_BESIDE = 6.0       # a beside label starts this far from its bar or marker
 ITEM_GAP = 8.0         # horizontal gap between two footprints sharing a row
@@ -168,6 +168,7 @@ class DenseLayout:
         self.line_h = self.size * LINE
         self.thin = spec.get("bar_mode") == "thin"   # thin bars: every label beside (or above) its bar, rows one text line high
         self.thin_h = float(spec.get("bar_h_thin", 10.0))
+        self.rev2 = bool(spec.get("rev2"))  # 0.5.0 behaviour: dependencies painted over the bars and routed to stay visible
         self.legend_mode = "bottom"
         self.straddle_first = False  # set by solve() when the chosen layout has height to spare
         self.above_clear: dict = {}  # id(row) -> extra room above a name set over its bar (a bar just above it would claim it)
@@ -934,8 +935,24 @@ class DenseLayout:
                     if seg.overlaps(Box(b.x0 + 1, b.y0 + 1, b.x1 - 1, b.y1 - 1)):
                         c += 200
                 for iid, b in bars:
-                    if iid not in (src.id, dst.id) and seg.overlaps(Box(b.x0 + 1, b.y0 + 1, b.x1 - 1, b.y1 - 1)):
+                    inner = Box(b.x0 + 1, b.y0 + 1, b.x1 - 1, b.y1 - 1)
+                    if self.rev2:
+                        # a horizontal run on a bar, or in the hairline gap beside one, cannot be told from the bar: it costs
+                        # its length. Crossing a bar is cheap (the line is painted over it).
+                        near = Box(b.x0 + 1, b.y0 - 3, b.x1 - 1, b.y1 + 3)
+                        if seg.y1 - seg.y0 < 0.5 and seg.overlaps(near):
+                            c += 1.5 * max(0.0, min(seg.x1, near.x1) - max(seg.x0, near.x0))
+                        elif seg.overlaps(inner) and iid not in (src.id, dst.id):
+                            c += 2
+                        continue
+                    if iid not in (src.id, dst.id) and seg.overlaps(inner):
                         c += 2
+                if self.rev2:
+                    for t in self.tasks:
+                        if t.label and t.label.where == "inside":
+                            lb = t.label.box()
+                            if seg.overlaps(Box(lb.x0 + 1, lb.y0 + 1, lb.x1 - 1, lb.y1 - 1)):
+                                c += 200
                 for iid, b in markers:
                     if iid not in (src.id, dst.id) and seg.overlaps(Box(b.x0 - 6, b.y0 - 6, b.x1 + 6, b.y1 + 6)):
                         c += 1000  # never over, and never within 10 px of, a marker that is not its own end
@@ -968,7 +985,21 @@ class DenseLayout:
                               "points": [[round(px, 2), round(py, 2)] for px, py in corners]})
 
     def _on_visible_line(self, gate: Item, y: float) -> bool:
+        if self.rev2 and any(t.x0 + 0.5 < gate.x0 < t.x1 - 0.5 and t.y - 1 <= y <= t.y + t.h + 1 for t in self.tasks):
+            return False  # a bar crossing the gate is painted over its line there
         return any(y0 + 1 <= y <= y1 - 1 for y0, y1 in self.gate_segments.get(gate.id, []))
+
+    def _clear_bands(self, x0: float, x1: float, min_h: float = 9.0) -> list:
+        """Centres of the stretches of the lanes area, at least min_h high, where no bar or name lies between x0 and x1."""
+        top, bottom = self.geo["lanes_top"], self.geo["lanes_bottom"]
+        solid = [(t.y, t.y + t.h) for t in self.tasks if t.x0 < x1 and x0 < t.x1]
+        solid += [(b.y0, b.y1) for _, b in self.label_boxes() if b.x0 < x1 and x0 < b.x1]
+        out, cursor = [], top
+        for y0, y1 in sorted(solid) + [(bottom, bottom)]:
+            if y0 - cursor >= min_h:
+                out.append((cursor + y0) / 2)
+            cursor = max(cursor, y1)
+        return out
 
     def _gate_points(self, gate: Item, gaps: list, hint: float) -> list:
         """Candidate points on a gate's visible line: each visible segment's lowest point, the row gaps inside it, and the
@@ -979,9 +1010,13 @@ class DenseLayout:
                 continue
             ys.append(y1 - 1.5)
             ys += [g for g in gaps if y0 + 2 <= g <= y1 - 2]
+            if self.rev2:
+                ys += [c for c in self._clear_bands(gate.x0 - 18, gate.x0 + 18) if y0 + 2 <= c <= y1 - 2]
         if self._on_visible_line(gate, hint):
             ys.append(hint)
         ys = sorted(set(round(y, 2) for y in ys))
+        if self.rev2:
+            ys = [y for y in ys if self._on_visible_line(gate, y)] or ys
         return [(gate.x0, y) for y in ys] or [(gate.x0, self.geo["lanes_bottom"])]
 
     def _anchor(self, it: Item, role: str, other_y: float) -> tuple:
@@ -1025,9 +1060,19 @@ class DenseLayout:
                         if t.kind == "gate":
                             x_start = min(a[0] - 10, b[0] - 10)
                             opts.append([(x_start, under), (x_start, gy), (b[0], gy)])
+                            if self.rev2:
+                                for cy in sorted(self._clear_bands(b[0] - 20, b[0] - 1), key=lambda c: abs(c - (s.y + s.h / 2)))[:3]:
+                                    edge = under if cy > s.y else s.y
+                                    opts.append([(b[0] - 14, edge), (b[0] - 14, cy), (b[0], cy)])
                         elif entering_left:
                             for back in range(8, 40, 4):
                                 opts.append([(a[0] - 6, under), (a[0] - 6, gy), (b[0] - back, gy), (b[0] - back, b[1]), b])
+                if self.rev2 and s.kind == "task" and t.kind == "task" and abs(a[1] - b[1]) > 2:
+                    # the target runs on under (or over) the source's end: step out of the source and drop onto the target's edge
+                    for dx in (8, 12, 16):
+                        x = a[0] + dx
+                        if t.x0 + 4 <= x <= t.x1 - 4:
+                            opts.append([a, (x, a[1]), (x, t.y if b[1] > a[1] else t.y + t.h)])
                 if s.kind == "task" and entering_left:
                     for gy in [g for g in gaps if min(a[1], b[1]) <= g <= max(a[1], b[1])]:
                         for back in range(8, 40, 4):
@@ -1155,18 +1200,32 @@ class DenseLayout:
         for g in self.gates:
             for k, (y0, y1) in enumerate(self.gate_segments[g.id]):
                 out.append(f'<line{attrs("milestone:" + g.id, "gate-line", f"{prefix}-ms-{g.id}-line{k}")} x1="{g.x0:.2f}" y1="{y0:.2f}" x2="{g.x0:.2f}" y2="{y1:.2f}" stroke="{c["gate"]}" stroke-width="1.5" stroke-dasharray="5 3"/>')
-        # 5 dependencies (behind bars)
+        # 5 dependencies (behind bars; rev2: painted after the bars, see below)
+        dep_svg = []
         for dep in self.deps:
             d = "M" + " L".join(f"{px:g} {py:g}" for px, py in dep["points"])
-            out.append(f'<path{attrs("dependency:" + dep["id"], "dependency", f"{prefix}-dep-{dep["id"]}")} d="{d}" fill="none" stroke="{c["dependency"]}" stroke-width="1.5" marker-end="url(#{prefix}-arrow)"/>')
+            dep_svg.append(f'<path{attrs("dependency:" + dep["id"], "dependency", f"{prefix}-dep-{dep["id"]}")} d="{d}" fill="none" stroke="{c["dependency"]}" stroke-width="1.5" marker-end="url(#{prefix}-arrow)"/>')
+        if not self.rev2:
+            out.extend(dep_svg)
         # 6 bars and labels, lane events
         for t in self.tasks:
             fill = t.style.get("fill") or c["bar"]
             out.append(f'<rect{attrs("task:" + t.id, "bar", f"{prefix}-task-{t.id}")} x="{t.x0:.2f}" y="{t.y:.2f}" width="{t.x1 - t.x0:.2f}" height="{t.h:.2f}" fill="{fill}"/>')
             colour = (t.style.get("text") or c["bar_text"]) if t.label.where == "inside" else c["text"]
             out.append(text(t.label, "task:" + t.id, "bar-label", colour, f"{prefix}-task-{t.id}-label"))
+        if self.rev2:
+            out.extend(dep_svg)
         for e in self.events:
             x, y = e.x0, e.y
+            if self.rev2 and (e.style.get("payment") or e.style.get("focal")):  # a milestone placed in a lane keeps its diamond
+                rr = 5.0
+                if e.style.get("payment"):
+                    pr = rr + 2.5
+                    out.append(f'<polygon{attrs("milestone:" + e.id, "payment-ring")} points="{x:.2f},{y - pr:.2f} {x + pr:.2f},{y:.2f} {x:.2f},{y + pr:.2f} {x - pr:.2f},{y:.2f}" fill="none" stroke="{c["milestone"]}" stroke-width="1"/>')
+                fill = c["focal"] if e.style.get("focal") else c["milestone"]
+                out.append(f'<polygon{attrs("milestone:" + e.id, "milestone-marker", f"{prefix}-ms-{e.id}")} points="{x:.2f},{y - rr:.2f} {x + rr:.2f},{y:.2f} {x:.2f},{y + rr:.2f} {x - rr:.2f},{y:.2f}" fill="{fill}"/>')
+                out.append(text(e.label, "milestone:" + e.id, "milestone-label", c["text"], f"{prefix}-ms-{e.id}-label"))
+                continue
             out.append(f'<polygon{attrs("milestone:" + e.id, "milestone-marker", f"{prefix}-ms-{e.id}")} points="{x:.2f},{y - EVENT_R:.2f} {x + EVENT_R:.2f},{y + EVENT_R * 0.8:.2f} {x - EVENT_R:.2f},{y + EVENT_R * 0.8:.2f}" fill="{c["event"]}"/>')
             out.append(text(e.label, "milestone:" + e.id, "milestone-label", c["text"], f"{prefix}-ms-{e.id}-label"))
         # 7 strip: leaders, markers, names

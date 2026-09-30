@@ -278,14 +278,15 @@ def size_node(scene: dict, node: dict, wrap_scale: float = 1.0) -> None:
     """Measured box for a node: title (bold, body size) and optional sublabel; never smaller than its text."""
     t = scene["type"]
     max_w = float(node.get("max_w") or scene.get("node_max_w") or 200.0) * wrap_scale
-    inner = max(max_w - 2 * PAD_X, 40.0)
+    pad_x, pad_y = (float(v) for v in (scene.get("node_pad") or (PAD_X, PAD_Y)))  # compose_page.py density ladder
+    inner = max(max_w - 2 * pad_x, 40.0)
     title = measure_text(scene, node.get("label") or node["id"], t["node_px"], "body", "bold", inner)
     sub = measure_text(scene, node["sublabel"], t["sub_px"], "label", "normal", inner) if node.get("sublabel") else None
     text_w = max(title["width_px"], sub["width_px"] if sub else 0.0)
     title_h = len(title["lines"]) * PITCH * t["node_px"]
     sub_h = (SUB_GAP + len(sub["lines"]) * PITCH * t["sub_px"]) if sub else 0.0
-    need_w = text_w + 2 * PAD_X
-    need_h = title_h + sub_h + 2 * PAD_Y
+    need_w = text_w + 2 * pad_x
+    need_h = title_h + sub_h + 2 * pad_y
     node["measure"] = {"title_lines": title["lines"], "title_widths": title["line_widths_px"],
                        "sub_lines": sub["lines"] if sub else [], "sub_widths": sub["line_widths_px"] if sub else [],
                        "need_w": round(need_w, 2), "need_h": round(need_h, 2), "wrap_width": round(inner, 1),
@@ -310,7 +311,7 @@ def zone_insets(scene: dict, zone: dict) -> tuple[float, float, float, float]:
     """(left, top, right, bottom) space between the zone outline and its content."""
     pad = ZONE_PAD if zone.get("pad") is None else float(zone["pad"])
     caption = zone.get("caption") or zone_caption(scene, zone)
-    top = pad + (caption["h"] + CAPTION_GAP if caption["h"] else 0.0)
+    top = pad + (caption["h"] + float(scene.get("caption_gap", CAPTION_GAP)) if caption["h"] else 0.0)
     return pad, top, pad, pad
 
 

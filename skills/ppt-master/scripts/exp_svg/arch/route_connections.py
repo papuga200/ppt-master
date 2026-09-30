@@ -382,6 +382,8 @@ def route_orthogonal(scene: dict, ports: dict, only: set | None = None) -> tuple
         if only is not None and edge["id"] not in only and (edge.get("route") or {}).get("points"):
             pts = edge["route"]["points"]
             routed_segments += list(zip(map(tuple, pts), map(tuple, pts[1:])))
+    for pts in scene.get("pre_routed") or []:  # lines drawn outside the router (compose_page.py buses): cross, never run along
+        routed_segments += list(zip(map(tuple, pts), map(tuple, pts[1:])))
     routes, failures = {}, {}
     for edge in order:
         keys = ((edge["id"], "source"), (edge["id"], "target"))

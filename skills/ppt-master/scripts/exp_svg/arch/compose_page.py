@@ -62,6 +62,28 @@ import scene as sc  # noqa: E402
 
 TOOL = "exp_svg.arch.compose_page"
 ROOT_ID = "__page__"
+# spacing scales tried in order when the layout does not fit at the requested spacing (compose engine "page2")
+DENSITY_LEVELS = (1.0, 0.8, 0.65, 0.5)
+
+
+def _densify(request: dict, root: dict | None, f: float) -> tuple[dict, dict | None]:
+    """A copy of the request with gaps, zone padding and node padding scaled by f (floors keep things apart)."""
+    import copy
+    req, rt = copy.deepcopy(request), copy.deepcopy(root)
+    if f >= 0.999:
+        return req, rt
+    layouts = [z["layout"] for z in req.get("zones") or [] if isinstance(z.get("layout"), dict)]
+    if rt and isinstance(rt.get("layout"), dict):
+        layouts.append(rt["layout"])
+    for layout in layouts:
+        layout["gap_x"] = round(max(8.0, float(layout.get("gap_x", arrange_mod.DEFAULT_GAP_X)) * f), 1)
+        layout["gap_y"] = round(max(5.0, float(layout.get("gap_y", arrange_mod.DEFAULT_GAP_Y)) * f), 1)
+    for zone in req.get("zones") or []:
+        if zone.get("kind") != "group":
+            zone["pad"] = round(max(5.0, float(sc.ZONE_PAD if zone.get("pad") is None else zone["pad"]) * f), 1)
+    req["node_pad"] = [round(max(8.0, sc.PAD_X * f), 1), round(max(4.0, sc.PAD_Y * f), 1)]
+    req["caption_gap"] = round(max(3.0, sc.CAPTION_GAP * f), 1)
+    return req, rt
 
 
 def _install_root(scene: dict, root: dict | None) -> None:
@@ -216,8 +238,9 @@ def _draw_buses(scene: dict, buses: dict, bus_edges: list[dict]) -> tuple[str, l
                      f'data-arch-source="{edge["source"]}" data-arch-target="{edge["target"]}" '
                      f'd="{sc.path_d(drawn)}" fill="none" stroke="{es["stroke"]}" '
                      f'stroke-width="{es.get("width", 1.5)}"{dash}{head}/>')
-        report.setdefault(item["bus"], {"x": round(bx, 2), "branches": []})["branches"].append(
-            {"flow": edge["id"], "node": item["node"], "side": item["side"], "y": item["trunk_y"], "bends": len(points) - 2})
+        rec = report.setdefault(item["bus"], {"x": round(bx, 2), "branches": [], "paths": []})
+        rec["branches"].append({"flow": edge["id"], "node": item["node"], "side": item["side"], "y": item["trunk_y"], "bends": len(points) - 2})
+        rec["paths"].append([(round(px_, 2), round(py_, 2)) for px_, py_ in points])
     for item in plan:  # the label code below works on the horizontal part that meets the trunk
         item["y"] = item["trunk_y"]
         item["nx"] = item["run"][0] if abs(item["run"][1] - item["bx"]) < 0.01 else item["run"][1]
@@ -265,7 +288,8 @@ def _add_arguments(parser) -> None:
 def _work(request: dict, args) -> tuple[str, dict, list, list, dict]:
     check_engine("placement", "primitive")
     check_engine("routing", "orthogonal")
-    check_engine("compose", "page")
+    import os as _os
+    check_engine("compose", "page2" if "compose:page2" in (_os.environ.get("PPT_MASTER_EXP_ENGINES") or "") else "page")
     page = request.pop("page", None)
     if not isinstance(page, dict):
         raise HelperError("compose_page needs a `page` block (template, texts, body)")
@@ -291,9 +315,21 @@ def _work(request: dict, args) -> tuple[str, dict, list, list, dict]:
             raise HelperError("every spacer needs an id")
         spacers.append({"id": sp["id"], "box": {"x": 0.0, "y": 0.0, "w": float(sp.get("w", 1)), "h": float(sp.get("h", 1))}})
     request["spacers"] = spacers
-    _install_root(request, root)
-    _, scene, arranged = arrange_mod.arrange(request, "primitive")
+    # placement: the requested spacing first; with the "page2" engine, tighter spacing is tried before a capacity failure
+    import os
+    ladder = DENSITY_LEVELS if "compose:page2" in (os.environ.get("PPT_MASTER_EXP_ENGINES") or "") or request.pop("density_ladder", False) else (1.0,)
+    density = 1.0
+    for density in ladder:
+        req, rt = _densify(request, root, density)
+        _install_root(req, rt)
+        _, scene, arranged = arrange_mod.arrange(req, "primitive")
+        if not any(r.get("kind") == "capacity" for r in arranged):
+            break
     _strip_groups(scene)
+    if len(ladder) > 1:  # bus lines are known once boxes are placed: the router crosses them but does not run along them
+        _, _, plan_report = _draw_buses(scene, buses, bus_edges)
+        scene["pre_routed"] = [[(b["x"], b["y0"]), (b["x"], b["y1"])] for b in plan_report.values() if "y0" in b] + \
+                              [p for b in plan_report.values() for p in b.get("paths", [])]
     _, scene, routed = route_connections.route(scene, "orthogonal")
     residuals = [r for r in arranged if r.get("kind") == "capacity" or r.get("op")]
     for r in residuals:  # the page-wide layout is the body region: say so in the creator's words
@@ -331,8 +367,14 @@ def _work(request: dict, args) -> tuple[str, dict, list, list, dict]:
                           "target": (e["route"].get("binding") or {}).get("target"),
                           "glue_expected": (e["route"].get("glue") or {}).get("expected")} for e in scene["edges"]}
     boxes = {item["id"]: item["box"] for group_name in ("zones", "nodes", "annotations") for item in scene[group_name]}
+    for rec in bus_report.values():
+        rec.pop("paths", None)
     summary = {"page": {**page_compose.report(layout), "path": str(page_path)}, "boxes": boxes, "bindings": bindings,
-               "buses": bus_report}
+               "buses": bus_report, "spacing_scale": density}
+    if density < 0.999:
+        residuals.append({"kind": "spacing_tightened", "scale": density,
+                          "message": f"the layout did not fit at the requested spacing: gaps and paddings were scaled to {density:g} "
+                                     f"of what you asked (nothing was dropped or shrunk). Free room elsewhere to get the spacing back"})
     return status, summary, residuals, sc.content_ids(scene) + [e["id"] for e in bus_edges], {"scene_sha256": sc.scene_hash(scene)}
 
 

@@ -185,7 +185,7 @@ def normalise(request: dict) -> tuple[dict | None, list, list]:
             "colors": style.get("colors") or {}, "bar_pad_x": float(style.get("bar_pad_x", 8)),
             "bar_pad_y": float(style.get("bar_pad_y", 4)), "name_max_lines": int(style.get("name_max_lines", 3)),
             "bar_mode": style.get("bar_mode", "labelled"), "bar_h_thin": float(style.get("bar_h_thin", 10)),
-            "header": style.get("header", "stacked")}
+            "header": style.get("header", "stacked"), "rev2": bool(style.get("rev2"))}
     if style.get("lane_label_w"):
         spec["lane_label_w"] = float(style["lane_label_w"])
     return spec, [], notes

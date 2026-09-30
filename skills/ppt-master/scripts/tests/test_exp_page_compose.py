@@ -214,3 +214,66 @@ def test_arch_engine_pin_refuses_compose_in_package_a(tmp_path, monkeypatch):
     done = subprocess.run([sys.executable, str(EXP / "arch" / "compose_page.py"), "--in", str(request), "--out", str(out),
                            "--page", str(tmp_path / "slide.svg")], capture_output=True, text=True, env=env)
     assert json.loads(out.read_text(encoding="utf-8"))["status"] == "error" and done.returncode == 2
+
+
+# ---------------------------------------------------------------------------------------------- package B2 (reserve)
+
+def _overlap_request(tmp_path: Path) -> dict:
+    spec = _timeline_request(tmp_path)
+    spec["tasks"] = [{"id": "t1", "name": "Racking", "lane": "a", "weeks": [1, 6]}, {"id": "t2", "name": "Systems", "lane": "a", "weeks": [5, 9]},
+                     {"id": "t3", "name": "Trial picks", "lane": "b", "weeks": [7, 10]}]
+    spec["milestones"] += [{"id": "p1", "name": "First pay", "week": 4, "kind": "milestone", "placement": "lane", "lane": "b", "payment": True}]
+    spec["dependencies"] = [{"id": "d1", "from": "t1", "to": "t2"}]
+    return spec
+
+
+def _build(tmp_path: Path, spec: dict, engines: str) -> tuple[dict, str]:
+    request = tmp_path / "timeline.json"
+    request.write_text(json.dumps(spec), encoding="utf-8")
+    out, page = tmp_path / "result.json", tmp_path / "slide.svg"
+    env = {**__import__("os").environ, "PPT_MASTER_EXP_ENGINES": engines}
+    subprocess.run([sys.executable, str(EXP / "timeline" / "build_timeline.py"), "--in", str(request), "--out", str(out), "--page", str(page)],
+                   capture_output=True, text=True, env=env)
+    return json.loads(out.read_text(encoding="utf-8")), page.read_text(encoding="utf-8")
+
+
+def test_rev2_dependency_steps_out_and_is_painted_over_the_bars(tmp_path):
+    result, text = _build(tmp_path, _overlap_request(tmp_path), "timeline:dense;timeline_rev:2")
+    assert result["status"] in ("ok", "partial")
+    dep = result["scene"]["dependencies"][0]
+    tasks = {t["id"]: t for t in result["scene"]["tasks"]}
+    # the target starts before the source ends: the connector leaves the source's end and drops onto the target's edge
+    assert len(dep["points"]) == 3 and dep["points"][0][0] == pytest.approx(tasks["t1"]["x1"], abs=0.5)
+    assert tasks["t2"]["x0"] < dep["points"][-1][0] < tasks["t2"]["x1"]
+    assert text.index('id="timeline-dep-d1"') > text.index('id="timeline-task-t2"')  # painted after the bars
+    assert 'data-content-id="milestone:p1" data-role="payment-ring"' in text  # a lane-placed payment milestone keeps its ring
+
+
+def test_package_b_keeps_dependencies_behind_bars(tmp_path):
+    result, text = _build(tmp_path, _overlap_request(tmp_path), "timeline:dense")
+    assert result["status"] in ("ok", "partial")
+    assert text.index('id="timeline-dep-d1"') < text.index('id="timeline-task-t1"')
+    assert 'data-role="payment-ring"' not in text.split('id="timeline-ms-p1"')[0][-400:]
+
+
+def test_arch_page2_tightens_spacing_before_a_capacity_failure(tmp_path):
+    spec = _arch_request(tmp_path)
+    request = tmp_path / "scene.json"
+    spec["page"]["body"] = {"x": 64, "y": 208, "w": 1152, "h": 60}  # far too small: read what the layout needs
+    request.write_text(json.dumps(spec), encoding="utf-8")
+    probe = tmp_path / "probe.json"
+    _run(EXP / "arch" / "compose_page.py", "--in", str(request), "--out", str(probe), "--page", str(tmp_path / "probe.svg"))
+    needs = next(r for r in json.loads(probe.read_text(encoding="utf-8"))["residual_constraints"] if r["kind"] == "capacity")["needs"]["h"]
+    spec["page"]["body"]["h"] = round(needs - 10)  # ten pixels short at the requested spacing
+    request.write_text(json.dumps(spec), encoding="utf-8")
+    results = {}
+    for mode in ("page", "page2"):
+        out = tmp_path / f"composed.{mode}.json"
+        env = {**__import__("os").environ, "PPT_MASTER_EXP_ENGINES": f"placement:primitive;routing:orthogonal;compose:{mode}"}
+        subprocess.run([sys.executable, str(EXP / "arch" / "compose_page.py"), "--in", str(request), "--out", str(out),
+                        "--page", str(tmp_path / f"slide.{mode}.svg")], capture_output=True, text=True, env=env)
+        results[mode] = json.loads(out.read_text(encoding="utf-8"))
+    assert results["page"]["status"] == "capacity_failure"
+    assert results["page2"]["status"] != "capacity_failure"
+    assert results["page2"]["result"]["spacing_scale"] < 1.0
+    assert any(r["kind"] == "spacing_tightened" for r in results["page2"]["residual_constraints"])
