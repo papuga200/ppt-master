@@ -488,6 +488,7 @@ class Inspector:
         self.threshold = float(self.cl.get("match_threshold", request.get("match_threshold", 0.8)))
         self.item_units: dict[str, list[dict]] = {}   # matched text units per item (best first)
         self.item_anchor: dict[str, dict] = {}        # resolved geometry per item: {"rect", "ref", "how"}
+        self.item_alternates: dict[str, list] = {}    # further drawn instances of a node item (any-of for relationships)
         self.text_roles: dict[str, tuple[str, str]] = {}
         self.item_presence: dict[str, str] = {}      # present / partial / missing per checklist item with text
         self.units = self._units()
@@ -1184,6 +1185,47 @@ class Inspector:
                     best = d
         return best
 
+    def _style_verdict(self, style: str, chain: list[dict]) -> tuple[Optional[bool], str]:
+        """solid / dashed are checked directly. A named style ('read', 'scoped write') is checked against the request's
+        style_map, else against the slide's own legend sample whose text names it; otherwise it is unverified."""
+        st = norm(style)
+        if st in ("solid", "dashed"):
+            got = ["dashed" if c.get("dashed") else "solid" for c in chain]
+            return all(g == st for g in got), f"drawn {got}"
+        spec = (self.req.get("style_map") or {}).get(style)
+        source = "request style_map"
+        if spec is None:
+            spec, source = self._legend_style(st)
+        if spec is None:
+            return None, f"'{style}' is not solid/dashed, has no style_map entry and no legend entry names it"
+        bad = []
+        for c in chain:
+            if "dashed" in spec and bool(c.get("dashed")) != bool(spec["dashed"]):
+                bad.append(f"{c['ref']} {'dashed' if c.get('dashed') else 'solid'}")
+            dist = G.color_distance(c.get("stroke"), spec.get("stroke")) if spec.get("stroke") else None
+            if dist is not None and dist > float(spec.get("tolerance", 60.0)):
+                bad.append(f"{c['ref']} colour {G.hex_of(c.get('stroke'))} vs {G.hex_of(spec['stroke'])}")
+        return (not bad), (f"{source}: " + ("; ".join(bad) if bad else "matches"))
+
+    def _legend_style(self, style_norm: str) -> tuple[Optional[dict], str]:
+        """The legend sample line whose text contains the style's words (e.g. 'read', 'scoped write')."""
+        want = tokens(style_norm)
+        if not want:
+            return None, ""
+        for c in self.m.connectors:
+            r = c["rect"]
+            if c.get("length", 0) > 60 or G.height(r) > 3:
+                continue
+            cy = (r[1] + r[3]) / 2
+            for line in self.m.lines:
+                lr = line["rect"]
+                if not (lr[1] - 2 <= cy <= lr[3] + 2 and 0 <= lr[0] - r[2] <= 16):
+                    continue
+                have = tokens(line["text"])
+                if all(w in have for w in want) and len(have) <= len(want) + 3:
+                    return {"dashed": bool(c.get("dashed")), "stroke": c.get("stroke")}, f"legend sample {c['ref']} ('{line['text']}')"
+        return None, ""
+
     def _legend_sample(self, c: dict, bindables: list[dict], tol: float) -> bool:
         """A short stroke with both ends free and a text label right beside it on the same line (a key entry)."""
         role = self._connector_role(c) or ""
@@ -1213,6 +1255,7 @@ class Inspector:
         for s in specs:
             if s in self.item_anchor:
                 out.append(self.item_anchor[s])
+                out.extend(self.item_alternates.get(s, []))
             elif self.m.rect_of(s) is not None:
                 out.append({"ref": s, "rect": self.m.rect_of(s), "refs": [s], "how": "element ref"})
         return out
@@ -1349,9 +1392,13 @@ class Inspector:
             reason = "arrowhead at the source end: direction reversed" if pick["head_at_src"] else "no arrowhead at the target end: direction not shown"
             self.rec.add("connectors", "failed", severity="major", message=f"relationship {rid}: {reason}", **ev)
             return
-        if style and any(s != style for s in pick["styles"]):
-            self.rec.add("connectors", "failed", severity="major", message=f"relationship {rid}: line style {pick['styles']} but {style} required", **ev)
-            return
+        if style:
+            verdict, why = self._style_verdict(style, [self.m.by_ref[r] for r in pick["chain"]])
+            if verdict is False:
+                self.rec.add("connectors", "failed", severity="major", message=f"relationship {rid}: line style does not match '{style}' ({why})", **ev)
+                return
+            if verdict is None:
+                self.rec.add("connectors", "unverified", targets=tgt, reason=why, message=f"relationship {rid}: line style '{style}' not checked")
         if loose is not None:
             gap = max(pick["d_src"], pick["d_dst"])
             self.rec.add("connectors", "failed", severity="minor", certainty=f"flagged: joined only within the loose tolerance ({loose:.0f} px, or a 60 px ray along the line from a free end)",
@@ -1569,10 +1616,24 @@ class Inspector:
             else:
                 self.rec.add("semantic", "failed", severity="blocker" if required else "minor", targets=[it["id"]], message=f"{it['id']} missing: '{it['text'][:60]}'",
                              expected=it["text"][:90])
-        # 2. anchors: nodes, lanes, texts
-        for it in items:
+        # 2. anchors: zones first (nodes are then looked for inside them), then nodes, lanes, texts
+        used_units: set = set()
+        node_candidates: dict[str, list] = {}
+        for it in sorted(items, key=lambda i: 0 if i.get("kind") == "zone" else 1):
             good = [u for u in self.item_units.get(it["id"], []) if u["score"] >= self.threshold]
             mapped = self.mapping.get(it["id"]) or {}
+            if it.get("kind") == "zone":
+                self._zone_anchor(it, good, mapped)
+                continue
+            if it.get("kind") == "node" and good:
+                node_candidates[it["id"]] = list(good)
+                zone = self.item_anchor.get(it.get("inside") or "")
+                if zone is not None and zone.get("how", "").startswith("zone"):
+                    inside = [u for u in good if G.contains_point(G.inflate(zone["rect"], 2.0), G.center(u["rect"]))]
+                    good = inside or good
+                fresh = [u for u in good if u["ref"] not in used_units]
+                good = fresh or good  # two nodes with the same words (one per region) take different labels
+                used_units.add(good[0]["ref"])
             if it.get("kind") in ("node", "zone"):
                 ref = mapped.get("node") or mapped.get("element") or it.get("element")
                 if ref and self.m.rect_of(ref):
@@ -1588,6 +1649,23 @@ class Inspector:
                         self.item_anchor[it["id"]] = {"ref": good[0]["ref"], "rect": good[0]["rect"], "refs": good[0]["refs"], "how": "label only (no enclosing shape)"}
             elif it.get("kind") in ("text", "lane", "legend", "annotation") and good:
                 self.item_anchor[it["id"]] = {"ref": good[0]["ref"], "rect": good[0]["rect"], "refs": good[0]["refs"], "how": "label"}
+        # 2b. a node drawn more than once (e.g. a tool shown as a read source and again as a write target): every further
+        # well-matching label that no other item claimed is an alternate instance; relationships accept any instance.
+        claimed = {r for a in self.item_anchor.values() for r in a.get("refs", [])}
+        for item_id, units in node_candidates.items():
+            primary = self.item_anchor.get(item_id)
+            if primary is None:
+                continue
+            for u in units:
+                if any(r in claimed for r in u["refs"]):
+                    continue
+                cont = self.m.container_of(u["rect"])
+                if cont is not None and G.area(cont["rect"]) > 20 * max(G.area(u["rect"]), 1.0):
+                    cont = None
+                alt = ({"ref": cont["ref"], "rect": G.union([cont["rect"], u["rect"]]), "refs": [cont["ref"], *u["refs"]], "how": "alternate instance (shape containing the label)"}
+                       if cont is not None else {"ref": u["ref"], "rect": u["rect"], "refs": u["refs"], "how": "alternate instance (label only)"})
+                self.item_alternates.setdefault(item_id, []).append(alt)
+                claimed.update(alt["refs"])
         # 3. timeline geometry
         bands = self._lane_bands() if any(it.get("kind") == "lane" for it in items) or (self.req.get("timeline") or {}).get("lane_bands") else {}
         timed = [it for it in items if it.get("kind") == "task" and "start" in it]
@@ -1834,8 +1912,35 @@ class Inspector:
                 return
             gap = float(it.get("max_gap_px", 12.0))
             d, u = min(((min(G.dist_rect_rect(u["rect"], a["rect"]) for a in anchor), u) for u in good), key=lambda x: x[0])
-            self.rec.add("semantic", "passed" if d <= gap else "failed", severity="blocker", targets=[it["id"], *u["refs"], *[a["ref"] for a in anchor]], measured=d, tolerance=gap,
-                         units="px", message=f"{it['id']} {'beside' if d <= gap else 'away from'} {it['near']} ({d:.1f} px)")
+            leader = None
+            if d > gap:  # a leader line from the note to (one of) its anchors attaches it as well
+                reach = float(it.get("leader_reach_px", 12.0))
+                for c in self.m.connectors:
+                    ends = (c["points"][0], c["points"][-1])
+                    for a_end, b_end in ((ends[0], ends[1]), (ends[1], ends[0])):
+                        if any(G.dist_point_rect(a_end, g["rect"]) <= reach for g in good) and                                 any(G.dist_point_rect(b_end, a["rect"]) <= reach for a in anchor):
+                            leader = c["ref"]
+                            break
+                    if leader:
+                        break
+            keyed = None
+            if d > gap and leader is None:  # a numbered key: the same number beside the note and on (or beside) its anchor
+                reach = float(it.get("key_reach_px", 16.0))
+                numerals = [ln for ln in self.m.lines if re.fullmatch(r"\s*\(?\d{1,2}[.)]?\s*", ln.get("text") or "")]
+                def digits(ln: dict) -> str:
+                    return re.sub(r"\D", "", ln["text"])
+                at_anchor = {digits(ln) for ln in numerals if any(G.dist_rect_rect(ln["rect"], a["rect"]) <= reach for a in anchor)}
+                at_note = {digits(ln) for ln in numerals if any(G.dist_rect_rect(ln["rect"], g["rect"]) <= reach for g in good)}
+                lead = {m.group(1) for g in good for m in [re.match(r"\s*\(?(\d{1,2})[.)]?\s", g.get("text") or "")] if m}
+                common = at_anchor & (at_note | lead)
+                if common:
+                    keyed = sorted(common)[0]
+            ok = d <= gap or leader is not None or keyed is not None
+            self.rec.add("semantic", "passed" if ok else "failed", severity=it.get("placement_severity", "blocker"),
+                         targets=[it["id"], *u["refs"], *[a["ref"] for a in anchor]], measured=d, tolerance=gap,
+                         units="px", message=(f"{it['id']} joined to {it['near']} by leader {leader}" if leader else
+                                              f"{it['id']} keyed to {it['near']} by number {keyed}" if keyed else
+                                              f"{it['id']} {'beside' if d <= gap else 'away from'} {it['near']} ({d:.1f} px)"))
 
     def _legend(self, it: dict) -> None:
         good = [u for u in self.item_units.get(it["id"], []) if u["score"] >= self.threshold]
@@ -1895,13 +2000,47 @@ class Inspector:
             self.rec.add("semantic", "passed" if ok else "failed", severity="major", targets=[it["id"], el["ref"]], measured={"element_colour": G.hex_of(el.get("fill") or el.get("stroke")), "rgb_distance": dist},
                          expected=it.get("symbol_color") or G.hex_of(swatch_color), units="RGB euclidean", message=f"{it['id']} legend {'agrees' if ok else 'disagrees'} with the style of {target}")
 
+    def _zone_anchor(self, it: dict, good: list[dict], mapped: dict) -> None:
+        """A zone's boundary: the declared or mapped element; else the author's group whose id or data-content-id
+        names the zone; else the smallest closed shape that contains the zone's label with room for content.
+        A zone whose boundary cannot be resolved gets no anchor, so its containment checks are unverified."""
+        ref = mapped.get("node") or mapped.get("element") or it.get("element")
+        if ref and self.m.rect_of(ref) is not None:
+            self.item_anchor[it["id"]] = {"ref": ref, "rect": self.m.rect_of(ref), "refs": [ref], "how": "zone: mapping/element"}
+            return
+        label = good[0]["rect"] if good else None
+        keys = {it["id"].casefold(), it["id"].split("-")[-1].casefold()}
+        if it.get("text"):
+            keys.add(re.sub(r"[^a-z0-9]+", "-", norm(it["text"])).strip("-"))
+        for g in self.m.groups:
+            names = {(g.get("id") or "").casefold(), ((g.get("data") or {}).get("data-content-id") or "").casefold()}
+            if not (keys & names):
+                continue
+            inner = [s for s in self.m.closed if g["id"] in s.get("ancestors", ()) and (label is None or G.contains_rect(s["rect"], label, 2.0))]
+            shape = max(inner, key=lambda s: G.area(s["rect"])) if inner else None
+            self.item_anchor[it["id"]] = {"ref": shape["ref"] if shape else g["ref"], "rect": shape["rect"] if shape else g["rect"],
+                                          "refs": [shape["ref"] if shape else g["ref"]], "how": "zone: author group " + g["id"]}
+            return
+        if label is None:
+            return
+        cands = [s for s in self.m.closed if G.contains_rect(s["rect"], label, 2.0) and not self.m.is_background(s)
+                 and s["tag"] in ("rect", "path", "polygon") and G.area(s["rect"]) >= 3 * G.area(label)
+                 and any(o is not s and G.contains_rect(s["rect"], o["rect"], 2.0) and G.area(o["rect"]) >= 200 for o in self.m.closed)]
+        if cands:
+            shape = min(cands, key=lambda s: G.area(s["rect"]))
+            self.item_anchor[it["id"]] = {"ref": shape["ref"], "rect": shape["rect"], "refs": [shape["ref"], *good[0]["refs"]],
+                                          "how": "zone: smallest boundary shape around its label"}
+
     def _inside(self, it: dict) -> None:
         node = self.item_anchor.get(it["id"])
-        zone = self._resolve_refs(it["inside"])
+        zone_item = self.item_anchor.get(it["inside"]) if isinstance(it["inside"], str) else None
+        zone = [zone_item] if zone_item is not None else ([] if isinstance(it["inside"], str) and it["inside"] in self.items else self._resolve_refs(it["inside"]))
         if node is None or not zone:
-            self.rec.add("semantic", "unverified", targets=[it["id"], str(it["inside"])], reason="node or zone not located", message=f"{it['id']} containment not checked")
+            why = "node not located" if node is None else "zone boundary shape not resolved (no element, mapping, matching group or enclosing shape)"
+            self.rec.add("semantic", "unverified", targets=[it["id"], str(it["inside"])], reason=why, message=f"{it['id']} containment not checked")
             return
+        tol = float(self.req.get("containment_tolerance_px", 2.0))
         ov = G.overflow(zone[0]["rect"], node["rect"])
-        ok = max(ov.values()) <= 1.0
-        self.rec.add("semantic", "passed" if ok else "failed", severity="blocker", targets=[it["id"], node["ref"], zone[0]["ref"]], measured=ov, tolerance=1.0, units="px",
-                     message=f"{it['id']} {'inside' if ok else 'not inside'} {it['inside']}")
+        ok = max(ov.values()) <= tol
+        self.rec.add("semantic", "passed" if ok else "failed", severity="blocker", targets=[it["id"], node["ref"], zone[0]["ref"]], measured=ov, tolerance=tol, units="px",
+                     located_by=zone[0].get("how"), message=f"{it['id']} {'inside' if ok else 'not inside'} {it['inside']}")
