@@ -1787,6 +1787,9 @@ class Inspector:
             self.item_anchor[it["id"]] = {"ref": c["ref"], "rect": rect, "core": c["rect"], "refs": refs, "how": how}
             err = (G.center(c["rect"])[0] - ex) / sc["px_per_unit"]
             ok = abs(err) <= sc["tolerance_units"]
+            window = it.get("accept_error_range")  # e.g. an event valid anywhere in its week: [-1.0, 0.5] units around `date`
+            if isinstance(window, (list, tuple)) and len(window) == 2:
+                ok = float(window[0]) - 1e-6 <= err <= float(window[1]) + 1e-6
             if record:
                 self.rec.add("timeline", "passed" if ok else "failed", severity="blocker", targets=[it["id"], c["ref"]], located_by=how,
                              certainty="measured" if how == "mapping" else "measured; marker chosen by geometry search",
