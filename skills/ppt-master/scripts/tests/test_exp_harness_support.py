@@ -190,6 +190,10 @@ def make_evidence(root: Path, cash_cap=None, run_plan: dict | None = None) -> Pa
     manifest["api_cash_cap_usd"] = cash_cap
     manifest["routes"]["grok_reviewer"]["cash_cap_usd"] = cash_cap
     (root / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    recipe = (manifest.get("reviewer_recipe") or {}).get("path")  # the frozen reviewer recipe travels with the manifest (D021)
+    if recipe and (HARNESS.parent / recipe).is_file():
+        (root / recipe).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(HARNESS.parent / recipe, root / recipe)
     creator = root / "fixtures" / "T-DEV" / "creator"
     creator.mkdir(parents=True)
     (creator / "brief.md").write_text("# Brief\n\nA delivery plan with Discovery, Build and Pilot phases.\n", encoding="utf-8")
