@@ -215,6 +215,20 @@ def submit(svg: Path, stage: str, request_path: Optional[Path], run_dir: Path, l
         text += (f"EXPORT (conversion evidence, not author findings): status {export_result['status']}; "
                  f"{len(conv)} conversion/contract findings: " + "; ".join(f"{f['code']}" for f in conv[:12]) + "\n")
     header = f"PASS {pass_id} ({entry['n']} of {lim[stage]} {stage} passes) | svg sha256 {digest}\n"
+    if "timeline_rev:2" in (os.environ.get("PPT_MASTER_EXP_ENGINES") or ""):
+        # package B2: tell the creator when the chart no longer matches what the tool wrote (the fork's TIMELINE_HAND_EDITED rule)
+        try:
+            scripts_dir = str(_HERE.parents[1])
+            if scripts_dir not in sys.path:
+                sys.path.insert(0, scripts_dir)
+            import timeline_layout
+            page_text = snap.read_bytes().decode("utf-8", errors="replace")
+            for group in timeline_layout.find_groups(page_text, layout=timeline_layout.LAYOUT_ATTR):
+                if timeline_layout.group_digest(group["inner"]) != group["attrs"].get("data-output-sha"):
+                    header += ("CHART EDITED BY HAND: the timeline group no longer matches what build_timeline.py wrote. Hand edits are where "
+                               "names drift from their bars and markers. Put the change in the request and run the tool again with --page.\n")
+        except (ImportError, OSError):
+            pass
     text = header + text
     (folder / "summary.txt").write_text(text, encoding="utf-8")
     res = common.envelope(TOOL, input_hash=digest, status=report.get("status", "error"), started=started, pass_id=pass_id, stage=stage,
