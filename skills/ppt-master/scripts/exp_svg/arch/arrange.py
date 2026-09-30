@@ -318,6 +318,9 @@ def _fit_zone_layout(scene: dict, zone: dict, table: dict) -> tuple[tuple[float,
     for item in items:
         if item not in table:
             raise HelperError(f"zone {zone['id']} layout names unknown id {item!r}")
+        zone_ids = {z["id"] for z in scene["zones"]}
+        if item not in node_ids and item not in zone_ids:
+            continue  # an annotation or the legend takes a layout slot like a box (its measured text block)
         owner = table[item].get("zone") if item in node_ids else table[item].get("parent")
         if owner != zone["id"]:
             raise HelperError(f"zone {zone['id']} layout lists {item!r}, which does not belong to that zone")
@@ -341,6 +344,7 @@ def _fit_zone_layout(scene: dict, zone: dict, table: dict) -> tuple[tuple[float,
                 "has": {"w": round(avail_w, 1), "h": round(avail_h, 1)},
                 "binding": [d for d, over in (("width", best[1] > avail_w + 0.01), ("height", best[2] > avail_h + 0.01)) if over],
                 "tried_wrap_scales": list(WRAP_SCALES),
+                "items": {i: [round(table[i]["box"]["w"]), round(table[i]["box"]["h"])] for i in items if table[i].get("box")},
                 "message": (f"zone {zone['id']} needs {best[1]:.0f} x {best[2]:.0f} px for its {len(items)} items at the type "
                             f"floors; its frame holds {avail_w:.0f} x {avail_h:.0f}. Nothing was dropped or shrunk: give it more "
                             f"room or change the structure")}
@@ -427,8 +431,14 @@ def arrange_primitive(scene: dict) -> tuple[list[dict], dict]:
         raise HelperError(f"nodes with no layout slot, `at` or constraint: {unplaced}")
     for zone in scene["zones"]:
         sc.set_caption_box(scene, zone)
+    slotted = {i for z in scene["zones"] if z.get("layout") for i in _layout_items(z)}
     for note in scene["annotations"]:
+        if note["id"] in slotted:  # placed by its layout slot, not by `attach`
+            note["at"] = {"x": note["box"]["x"], "y": note["box"]["y"]}
         sc.place_annotation(scene, note, table)
+    legend = scene.get("legend")
+    if legend and legend["id"] in slotted:
+        legend["at"] = {"x": legend["box"]["x"], "y": legend["box"]["y"]}
     return residuals, {"engine": "primitive"}
 
 

@@ -217,8 +217,12 @@ class Grid:
     def __init__(self, scene: dict, blocks: list[dict], extra_x: list[float], extra_y: list[float]):
         self.blocks = [b["rect"] for b in blocks]
         cw, ch = scene["canvas"]["w"], scene["canvas"]["h"]
-        xs = {4.0, cw - 4.0, *extra_x}
-        ys = {4.0, ch - 4.0, *extra_y}
+        lo_x, lo_y = 0.0, 0.0
+        rb = scene.get("route_bounds")  # compose_page.py: flows stay inside the body region (never over the title or source)
+        if rb:
+            lo_x, lo_y, cw, ch = float(rb["x"]), float(rb["y"]), float(rb["x"]) + float(rb["w"]), float(rb["y"]) + float(rb["h"])
+        xs = {lo_x + 4.0, cw - 4.0, *extra_x}
+        ys = {lo_y + 4.0, ch - 4.0, *extra_y}
         for x0, y0, x1, y1 in self.blocks:
             xs.update((x0, x1))
             ys.update((y0, y1))
@@ -231,8 +235,8 @@ class Grid:
             for a, b in zip(ordered, ordered[1:]):
                 if b - a > 2 * MARGIN:
                     values.add((a + b) / 2)
-        self.xs = sorted(round(v, 2) for v in xs if 0 <= v <= cw)
-        self.ys = sorted(round(v, 2) for v in ys if 0 <= v <= ch)
+        self.xs = sorted(round(v, 2) for v in xs if lo_x <= v <= cw)
+        self.ys = sorted(round(v, 2) for v in ys if lo_y <= v <= ch)
         self.zone_lines = []
         for zone in scene["zones"]:
             x0, y0, x1, y1 = sc.rect(zone["box"])

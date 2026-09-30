@@ -49,7 +49,8 @@ MIN_GAP = 4.0
 
 DEFAULT_TYPE = {"node_px": 16.0, "sub_px": 13.333, "edge_label_px": 13.333, "zone_label_px": 13.333,
                 "annotation_px": 16.0, "legend_px": 13.333}
-TYPE_ROLES = {"node_px": "body", "sub_px": "label", "edge_label_px": "label", "zone_label_px": "label",
+# node names are label-class text (style contracts list node labels with the labels, floor 13.33 px); the default stays 16
+TYPE_ROLES = {"node_px": "label", "sub_px": "label", "edge_label_px": "label", "zone_label_px": "label",
               "annotation_px": "body", "legend_px": "label"}
 DEFAULT_STYLE = {
     "text": "#1F2937", "muted": "#4B5563", "node_fill": "#FFFFFF", "node_stroke": "#1F2937", "node_stroke_width": 1.5,
@@ -59,7 +60,8 @@ DEFAULT_STYLE = {
     "node_text": "separate",
     "node_kinds": {"external": {"fill": "#F3F4F6", "dash": "5 3"}, "datastore": {"fill": "#EEF2F7"}},
     "zone_kinds": {"region": {"fill": "#F7F8FA", "stroke": "#8A96A3", "width": 1.2, "dash": None},
-                   "trust": {"fill": "none", "stroke": "#B4162E", "width": 1.5, "dash": "8 4"}},
+                   "trust": {"fill": "none", "stroke": "#B4162E", "width": 1.5, "dash": "8 4"},
+                   "group": {"fill": "none", "stroke": "none", "width": 0, "dash": None}},  # layout-only container, never drawn
     "edge_kinds": {"sync": {"stroke": "#1F2937", "width": 1.5, "dash": None, "head": True},
                    "async": {"stroke": "#1F2937", "width": 1.5, "dash": "6 4", "head": True},
                    "control": {"stroke": "#B4162E", "width": 1.5, "dash": None, "head": True},
@@ -260,6 +262,8 @@ def by_id(scene: dict) -> dict:
             table[item["id"]] = item
     if scene.get("legend"):
         table[scene["legend"]["id"]] = scene["legend"]
+    for item in scene.get("spacers") or []:  # compose_page.py: layout slots with a size and no drawing (connector buses)
+        table[item["id"]] = item
     return table
 
 
@@ -304,7 +308,7 @@ def zone_caption(scene: dict, zone: dict) -> dict:
 
 def zone_insets(scene: dict, zone: dict) -> tuple[float, float, float, float]:
     """(left, top, right, bottom) space between the zone outline and its content."""
-    pad = float(zone.get("pad") or ZONE_PAD)
+    pad = ZONE_PAD if zone.get("pad") is None else float(zone["pad"])
     caption = zone.get("caption") or zone_caption(scene, zone)
     top = pad + (caption["h"] + CAPTION_GAP if caption["h"] else 0.0)
     return pad, top, pad, pad
@@ -479,7 +483,7 @@ def node_checks(scene: dict) -> list[dict]:
 
 def set_caption_box(scene: dict, zone: dict) -> None:
     caption = zone.get("caption") or zone_caption(scene, zone)
-    pad = float(zone.get("pad") or ZONE_PAD)
+    pad = ZONE_PAD if zone.get("pad") is None else float(zone["pad"])
     caption["box"] = {"x": round(zone["box"]["x"] + pad, 2), "y": round(zone["box"]["y"] + pad * 0.6, 2),
                       "w": caption["w"], "h": caption["h"]}
     zone["caption"] = caption
@@ -553,6 +557,8 @@ def render_group(scene: dict, prefix: str = "arch") -> str:
     out = [f'<g id="{prefix}" font-family="{family}" data-arch-scene="{SCHEMA}">']
     depth = {z["id"]: len(zone_chain(scene, z["id"])) for z in scene["zones"]}
     for zone in sorted(scene["zones"], key=lambda z: depth[z["id"]]):
+        if zone["kind"] == "group":
+            continue  # a layout-only container: nothing is drawn
         zs = style["zone_kinds"][zone["kind"]]
         b = zone["box"]
         dash = f' stroke-dasharray="{zs["dash"]}"' if zs.get("dash") else ""
@@ -595,12 +601,13 @@ def render_group(scene: dict, prefix: str = "arch") -> str:
         out.append(f'<g id="{prefix}-node-{node["id"]}" data-arch-id="{node["id"]}" data-arch-role="node">'
                    f'<rect x="{_num(b["x"])}" y="{_num(b["y"])}" width="{_num(b["w"])}" height="{_num(b["h"])}" '
                    f'rx="{style["node_radius"]}" fill="{ns["fill"]}" stroke="{ns["stroke"]}" stroke-width="{ns["width"]}"{dash}/>')
+        ink = ns.get("text") or style["text"]
         if m["sub_lines"] and style.get("node_text", "separate") == "separate":
-            out.append(_text_block(m["title_lines"], cx, top, t["node_px"], style["text"], "bold", "middle", f'{node["id"]}:title'))
+            out.append(_text_block(m["title_lines"], cx, top, t["node_px"], ink, "bold", "middle", f'{node["id"]}:title'))
             out.append(_text_block(m["sub_lines"], cx, top + title_h + SUB_GAP, t["sub_px"], style["muted"], "normal",
                                    "middle", f'{node["id"]}:sub'))
         else:
-            out.append(_node_text(m, cx, top, t, style, node["id"]))
+            out.append(_node_text(m, cx, top, t, {**style, "text": ink}, node["id"]))
         out.append("</g>")
     # nodes, then flow labels and annotations, then the flows on top: the export pass that puts text into shapes (pptx_text_in_shapes.py) adopts
     # a text into the smallest shape painted beneath it, and an unglued freeform arrow's bounding box can hold another
@@ -609,8 +616,10 @@ def render_group(scene: dict, prefix: str = "arch") -> str:
     for note in scene["annotations"]:
         b = note["box"]
         out.append(f'<g id="{prefix}-note-{note["id"]}" data-arch-id="{note["id"]}" data-arch-role="annotation">'
-                   + _text_block(note["measure"]["lines"], b["x"], b["y"], note["measure"]["size_px"], style["muted"],
-                                 note.get("weight") or "normal", "start", f'{note["id"]}:text') + "</g>")
+                   + _text_block(note["measure"]["lines"], b["x"], b["y"], note["measure"]["size_px"],
+                                 note.get("fill") or style["muted"], note.get("weight") or "normal", "start",
+                                 f'{note["id"]}:text').replace("<text ", '<text font-style="italic" ' if note.get("italic") else "<text ", 1)
+                   + "</g>")
     out.extend(edges_svg)
     legend = scene.get("legend")
     if legend and legend.get("measure"):

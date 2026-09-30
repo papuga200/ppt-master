@@ -942,6 +942,10 @@ class Inspector:
                     continue  # text inside a bigger shape (nested container)
                 if self.m.related(s, line):
                     continue
+                if (container is not None and container.get("order", -1) > s["order"] and container.get("fill") not in (None, "none")
+                        and container.get("fill_opacity", 1) >= 0.99 and container.get("opacity", 1) >= 0.99
+                        and G.contains_rect(container["rect"], line["ink"], tol=1.0)):
+                    continue  # the text sits wholly inside an opaque shape painted over this one: this edge is hidden there
                 if s.get("outline") and G.overlap_area(line["ink"], None, s["rect"], s["outline"]) <= 2.0:
                     continue  # the box overlaps, the drawn outline does not
                 small = G.area(s["rect"]) < 3 * G.area(line["rect"]) and G.area(s["rect"]) < 2500

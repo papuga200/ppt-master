@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from xml.sax.saxutils import escape
 
 ENGINE = "exp_svg.dense_layout"
-ENGINE_VERSION = "0.3.0"
+ENGINE_VERSION = "0.4.0"
 LINE = 1.3             # line height / font size for labels (the fork lint's multi-line floor is 1.28 x: TIGHT_LEADING)
 GAP_BESIDE = 6.0       # a beside label starts this far from its bar or marker
 ITEM_GAP = 8.0         # horizontal gap between two footprints sharing a row
@@ -70,10 +70,12 @@ class Label:
     size: float = 14.0
     weight: str = "normal"
     gap: float = GAP_BESIDE  # distance from its bar or marker, for a label set beside it
+    rot: bool = False     # set reading upward (rotated -90 degrees): w is the block's width on the slide, span its height
+    span: float = 0.0
 
     @property
     def h(self) -> float:
-        return len(self.lines) * self.size * LINE
+        return self.span if self.rot else len(self.lines) * self.size * LINE
 
     def box(self) -> Box:
         return Box(self.x, self.y0, self.x + self.w, self.y0 + self.h)
@@ -522,6 +524,8 @@ class DenseLayout:
                     opts.append((Label(lines, w, "left", size=size, weight="bold"), gx - 4 - w))
             entries.append({"item": g, "x": gx, "opts": opts or [(Label([g.name], self.m.width(g.name, size, "bold"), "right", size=size, weight="bold"), gx + 4)], "line": True})
         for wdw in self.windows:
+            if wdw.id not in self.header_windows:
+                continue  # named inside its own band (window_labels: "band"), placed in finish()
             wx0, wx1 = self.x(wdw.d0), self.x(wdw.d1)
             opts = []
             for lines, w in self.m.wraps(wdw.name, size, self.max_lines):
@@ -533,7 +537,7 @@ class DenseLayout:
             opts = [(lab, lx) for lab, lx in opts if lx + 2 <= cx <= lx + lab.w - 2] or opts
             entries.append({"item": wdw, "x": cx, "opts": opts, "line": True})
         for i, text in enumerate(self.spec.get("edge_labels") or []):
-            if not text:
+            if not text or self.compact:  # compact: the two ruler dates are set in the rail corner beside the ruler
                 continue
             w = self.m.width(text, size)
             it = Item(f"edge{i}", "edge", text)
@@ -617,7 +621,13 @@ class DenseLayout:
         # header
         header_entries, header_depth = self.cached_stack("header", self.header_entries)
         header_h = header_depth + (4 if header_entries else 0)
-        ruler_h = self.tick_px * LINE + 8
+        ruler_h = self.tick_px * LINE + (5 if self.compact else 8)
+        self.corner_lines = []
+        if self.compact:
+            for text in self.spec.get("edge_labels") or []:
+                if text:
+                    self.corner_lines += self.m.wrap(text, size, rail_w - 12)[0]
+            header_h = max(header_h, len(self.corner_lines) * self.line_h + 2 - ruler_h)
         # lanes
         lane_rows, lane_heights, lane_name_lines = [], [], []
         self.above_clear = {}
@@ -649,7 +659,7 @@ class DenseLayout:
         legend = self.spec.get("legend") or []
         legend_h = 0.0
         if legend and legend_mode == "rail":
-            block = len(legend) * (self.line_h + 2) + 4
+            block = len(legend) * self.line_h + 2 if self.compact else len(legend) * (self.line_h + 2) + 4
             widest = max(20 + self.m.width(e["text"], size) for e in legend)
             if widest > rail_w - 8:
                 legend_h = float("inf")  # does not fit the rail column
@@ -660,6 +670,7 @@ class DenseLayout:
         return {"rail_w": rail_w, "row_gap": row_gap, "lane_pad": lane_pad, "order": order, "header_h": header_h,
                 "ruler_h": ruler_h, "lane_heights": lane_heights, "lane_rows": lane_rows, "lane_name_lines": lane_name_lines,
                 "strip_h": strip_h, "marker_row": marker_row, "legend_h": legend_h, "total": total, "legend_mode": legend_mode,
+                "pad_y": self.pad_y,
                 "straddle_first": self.straddle_first,
                 "straddles": sum(self._straddles(it, lab) for rows in lane_rows for row in rows for it, lab, *_ in row),
                 "header_entries": header_entries, "strip_entries": strip_entries,
@@ -667,7 +678,8 @@ class DenseLayout:
 
     def cached_stack(self, kind: str, make) -> tuple:
         """Stacked names depend only on the scale and the label size: compute once per scale, re-apply the labels after."""
-        key = (kind, round(self.chart_x0, 3), round(self.px_day, 6), self.size, self.legend_mode if kind == "strip" else "")
+        key = (kind, round(self.chart_x0, 3), round(self.px_day, 6), self.size, self.legend_mode if kind == "strip" else "",
+               tuple(sorted(self.header_windows)) if kind == "header" else ())
         cache = self.__dict__.setdefault("_stack_cache", {})
         if key not in cache:
             entries = make()
@@ -689,11 +701,29 @@ class DenseLayout:
         return sorted({float(min(max(b, 90), max(120, longest + 14))) for b in base})
 
     def solve(self) -> dict:
-        """The most generous density that fits; else the attempt needing the least height (reported as capacity failure)."""
+        """Solve; a window named inside its band (window_labels: "band") that finds no free place there returns to the
+        header stack and the layout is solved again, so the reported height always matches what is drawn."""
         self.build_items()
+        self.compact = self.spec.get("header") == "compact"
+        self.header_windows = set() if self.compact else {w.id for w in self.windows}
+        geo = None
+        for _ in range(len(self.windows) + 1):
+            self.band_misses = set()
+            geo = self._solve_once()
+            if not self.band_misses:
+                break
+            self.header_windows |= self.band_misses
+        return geo
+
+    def _solve_once(self) -> dict:
+        """The most generous density that fits; else the attempt needing the least height (reported as capacity failure)."""
         densities = self.spec.get("densities") or [(6, 8), (4, 6), (3, 4), (2, 3), (2, 2), (1, 1)]
         best_fail = None
-        for row_gap, lane_pad in densities:
+        asked = float(self.spec.get("bar_pad_y", 4.0))
+        # compact: when nothing fits at the asked bar padding, tighter padding is tried before reporting a capacity failure
+        pads = [asked] + ([p for p in (3.0, 2.0, 1.0) if p < asked] if self.compact and not self.thin else [])
+        for pad_y, (row_gap, lane_pad) in [(p, d) for p in pads for d in densities]:
+            self.pad_y = pad_y
             fits = []
             for rail in self.rail_candidates():
                 for legend_mode in (("rail", "bottom") if self.spec.get("legend") else ("bottom",)):
@@ -720,6 +750,7 @@ class DenseLayout:
         # re-run the chosen attempt so every item carries its geometry
         self.stack_violations = 0
         self.straddle_first = a.get("straddle_first", False)
+        self.pad_y = a.get("pad_y", self.pad_y)
         a = self.attempt(a["rail_w"], a["row_gap"], a["lane_pad"], a["order"], a["legend_mode"])
         chart_left, chart_right = self.chart_x0, self.label_right()
         r = self.region
@@ -790,7 +821,7 @@ class DenseLayout:
             lab.y0 = strip_top + box[1]
         legend_y = None
         if self.spec.get("legend"):
-            legend_y = lanes_bottom + 4 if a["legend_mode"] == "rail" else lanes_bottom + a["strip_h"] + 4
+            legend_y = (lanes_bottom + (2 if self.compact else 4)) if a["legend_mode"] == "rail" else lanes_bottom + a["strip_h"] + 4
         for g in self.gates:
             g.x0 = g.x1 = self.x(g.d0)
         for w in self.windows:
@@ -799,9 +830,70 @@ class DenseLayout:
                     "tick_base": tick_base, "lanes_top": lanes_top, "lanes_bottom": lanes_bottom, "lanes": lanes,
                     "row_bands": row_bands, "marker_y": marker_y, "strip_top": strip_top, "legend_y": legend_y,
                     "ticks": self.ticks(), "extra_pad": extra_pad}
+        self.place_band_names(lanes_top, lanes_bottom)
         self.cut_gate_lines()        # first: a dependency on a gate must start or end on a VISIBLE part of its line
         self.route_dependencies()
         return self.geo
+
+    def place_band_names(self, lanes_top: float, lanes_bottom: float) -> None:
+        """A window named inside its own band: the name is wrapped to the band's width and set in the highest stretch of
+        the band that no bar, label or marker touches. No free stretch: the window goes back to the header (solve())."""
+        size = self.size
+        for w in self.windows:
+            if w.id in self.header_windows:
+                continue
+            avail = (w.x1 - w.x0) - 6.0
+            cx = (w.x0 + w.x1) / 2
+            solid = []
+            for t in self.tasks:
+                solid.append(Box(t.x0, t.y, t.x1, t.y + t.h))
+            for e in self.events:
+                solid.append(Box(e.x0 - EVENT_R, e.y - EVENT_R, e.x0 + EVENT_R, e.y + EVENT_R))
+            for oid, box in self.label_boxes():
+                if oid != w.id:
+                    solid.append(box)
+            placed = None
+            for lines, lw in sorted(self.m.wraps(w.name, size, int(self.spec.get("band_name_max_lines", 6)), min_w=24.0),
+                                    key=lambda o: len(o[0])):
+                if lw > avail:
+                    continue
+                h = len(lines) * self.line_h
+                x0, x1 = cx - lw / 2, cx + lw / 2
+                hits = sorted((b.y0, b.y1) for b in solid if b.x0 < x1 + 3 and x0 - 3 < b.x1)
+                cursor = lanes_top + 2
+                for y0, y1 in hits + [(lanes_bottom - 2, lanes_bottom)]:
+                    if y0 - 2 - cursor >= h:
+                        placed = (lines, lw, x0, cursor)
+                        break
+                    cursor = max(cursor, y1 + 2)
+                if placed:
+                    break
+            rot = None
+            if placed is None:  # too narrow for its words: set the name reading upward where the band is empty
+                for lines, lw in sorted(self.m.wraps(w.name, size, 2, min_w=24.0), key=lambda o: len(o[0])):
+                    bw = len(lines) * self.line_h
+                    if bw > avail:
+                        continue
+                    x0, x1 = cx - bw / 2, cx + bw / 2
+                    hits = sorted((b.y0, b.y1) for b in solid if b.x0 < x1 + 3 and x0 - 3 < b.x1)
+                    cursor = lanes_top + 2
+                    for y0, y1 in hits + [(lanes_bottom - 2, lanes_bottom)]:
+                        if y0 - 2 - cursor >= lw:
+                            rot = (lines, bw, x0, cursor + max(0.0, (min(y0 - 2, lanes_bottom - 2) - cursor - lw) / 2), lw)
+                            break
+                        cursor = max(cursor, y1 + 2)
+                    if rot:
+                        break
+            if rot:
+                lines, bw, lx, top, span = rot
+                w.label = Label(list(lines), bw, "band", x=lx, y0=top, size=size, rot=True, span=span)
+                continue
+            if placed is None:
+                self.band_misses.add(w.id)
+                lines, lw = self.m.wraps(w.name, size, self.max_lines)[0]
+                placed = (lines, lw, min(max(cx - lw / 2, self.region["x"]), self.region["x"] + self.region["w"] - lw), lanes_top + 2)
+            lines, lw, lx, top = placed
+            w.label = Label(list(lines), lw, "band", x=lx, y0=top, size=size)
 
     # ---------------------------------------------------------------- dependencies
     def label_boxes(self) -> list:
@@ -1017,6 +1109,14 @@ class DenseLayout:
             return (f' id="{escape(extra_id)}"' if extra_id else "") + f' data-content-id="{escape(cid)}" data-role="{role}"'
 
         def text(lab: Label, cid, role, fill, anchor_id=None, weight=None):
+            if lab.rot:  # one <text> per line, rotated about its own centre (reads upward)
+                parts = []
+                cy = lab.y0 + lab.span / 2
+                for i, line in enumerate(lab.lines):
+                    bx = lab.x + (i + 0.5) * lab.size * LINE + 0.35 * lab.size
+                    parts.append(f'<text{attrs(cid, role, anchor_id if i == 0 else None)} x="{bx:.2f}" y="{cy:.2f}" font-size="{lab.size:g}" '
+                                 f'text-anchor="middle" transform="rotate(-90 {bx:.2f} {cy:.2f})" fill="{fill}">{escape(line)}</text>')
+                return "".join(parts)
             spans = "".join(f'<tspan x="{lab.x:.2f}" dy="{0 if i == 0 else round(lab.size * LINE, 2):g}">{escape(line)}</tspan>'
                             for i, line in enumerate(lab.lines))
             base = lab.y0 + 0.5 * lab.size * LINE + 0.35 * lab.size
@@ -1024,7 +1124,9 @@ class DenseLayout:
             return (f'<text{attrs(cid, role, anchor_id)} x="{lab.x:.2f}" y="{base:.2f}" font-size="{lab.size:g}"'
                     f'{" font-weight=\"bold\"" if w == "bold" else ""} fill="{fill}">{spans}</text>')
 
-        defs = (f'<marker id="{prefix}-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">'
+        # compact (0.4.0): a fixed 8 px head in slide units is what PowerPoint draws for 1-2 px lines, so preview and slide agree
+        units = ' markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse"' if self.compact else ' markerWidth="6" markerHeight="6"'
+        defs = (f'<marker id="{prefix}-arrow" viewBox="0 0 10 10" refX="9" refY="5"{units} orient="auto">'
                 f'<polygon points="0,0 10,5 0,10" fill="{c["dependency"]}"/></marker>')
         lanes_top, lanes_bottom = geo["lanes_top"], geo["lanes_bottom"]
         # 1 lane bands and names
@@ -1091,6 +1193,10 @@ class DenseLayout:
         for e in geo["attempt"]["header_entries"]:
             if e["item"].kind == "edge":
                 out.append(text(e["item"].label, "ruler", "edge-label", c["muted"]))
+        if self.compact and self.corner_lines:  # the ruler's two dates, in the rail corner, ending on the tick baseline
+            lab = Label(list(self.corner_lines), 0, "corner", size=size)
+            lab.x, lab.y0 = r["x"] + 8, lanes_top - 6 - lab.h
+            out.append(text(lab, "ruler", "edge-label", c["muted"]))
         # 9 legend (symbols only)
         if self.spec.get("legend") and geo["legend_y"] is not None:
             rail = geo["attempt"]["legend_mode"] == "rail"
@@ -1098,8 +1204,9 @@ class DenseLayout:
             for k, entry in enumerate(self.spec["legend"]):
                 sym = entry.get("symbol")
                 cid = f"legend:{k}"
+                gl = 5.5 if self.compact else 7.0  # compact: samples one text line high, so stacked rows do not touch
                 if sym == "gate":
-                    out.append(f'<line{attrs(cid, "legend-symbol")} x1="{lx + 6:.2f}" y1="{ly - 7:.2f}" x2="{lx + 6:.2f}" y2="{ly + 7:.2f}" stroke="{c["gate"]}" stroke-width="1.5" stroke-dasharray="5 3"/>')
+                    out.append(f'<line{attrs(cid, "legend-symbol")} x1="{lx + 6:.2f}" y1="{ly - gl:.2f}" x2="{lx + 6:.2f}" y2="{ly + gl:.2f}" stroke="{c["gate"]}" stroke-width="1.5" stroke-dasharray="5 3"/>')
                 elif sym == "event":
                     out.append(f'<polygon{attrs(cid, "legend-symbol")} points="{lx + 6:.2f},{ly - EVENT_R:.2f} {lx + 6 + EVENT_R:.2f},{ly + EVENT_R * 0.8:.2f} {lx + 6 - EVENT_R:.2f},{ly + EVENT_R * 0.8:.2f}" fill="{c["event"]}"/>')
                 elif sym == "window":
@@ -1109,9 +1216,9 @@ class DenseLayout:
                 elif sym == "dependency":
                     out.append(f'<path{attrs(cid, "legend-symbol")} d="M{lx:.2f} {ly:.2f} L{lx + 14:.2f} {ly:.2f}" fill="none" stroke="{c["dependency"]}" stroke-width="1.5" marker-end="url(#{prefix}-arrow)"/>')
                 else:  # milestone / payment / focal diamonds
-                    rr = MARKER_R
+                    rr = 4.0 if self.compact else MARKER_R
                     if sym == "payment":
-                        pr = rr + 3.5
+                        pr = rr + (2.5 if self.compact else 3.5)
                         out.append(f'<polygon{attrs(cid, "legend-symbol")} points="{lx + 6:.2f},{ly - pr:.2f} {lx + 6 + pr:.2f},{ly:.2f} {lx + 6:.2f},{ly + pr:.2f} {lx + 6 - pr:.2f},{ly:.2f}" fill="none" stroke="{c["milestone"]}" stroke-width="1"/>')
                     fill = c["focal"] if sym == "focal" else c["milestone"]
                     out.append(f'<polygon{attrs(cid, "legend-symbol")} points="{lx + 6:.2f},{ly - rr:.2f} {lx + 6 + rr:.2f},{ly:.2f} {lx + 6:.2f},{ly + rr:.2f} {lx + 6 - rr:.2f},{ly:.2f}" fill="{fill}"/>')
@@ -1119,7 +1226,7 @@ class DenseLayout:
                 lab.x, lab.y0 = lx + 20, ly - lab.h / 2
                 out.append(text(lab, cid, "legend-label", c["muted"]))
                 if rail:
-                    ly += self.line_h + 2
+                    ly += self.line_h if self.compact else self.line_h + 2
                 else:
                     lx += 20 + lab.w + 22
         return defs, out

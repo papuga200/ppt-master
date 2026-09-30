@@ -53,7 +53,7 @@ from xml.sax.saxutils import escape
 
 _HERE = Path(__file__).resolve().parent
 _SCRIPTS_DIR = _HERE.parents[1]
-for _path in (_SCRIPTS_DIR, _HERE):
+for _path in (_SCRIPTS_DIR, _HERE, _HERE.parent):
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
 
@@ -61,7 +61,7 @@ import timeline_layout  # noqa: E402
 from timeline_fonts import FontMetrics  # noqa: E402
 
 TOOL = "exp_svg.build_timeline"
-TOOL_VERSION = "0.3.0"
+TOOL_VERSION = "0.4.0"
 REQUEST_SCHEMA = "exp_svg.build_timeline.request.v1"
 RESULT_SCHEMA = "exp_svg.build_timeline.result.v1"
 ENGINE = "timeline_layout"  # round-1 engine; selectable with --engine timeline_layout
@@ -567,7 +567,8 @@ def write_scene(path: Path, time_scale: dict) -> None:
 
 
 def run(request_path: Path, out_path: Path, svg_path: Path | None = None, into: Path | None = None,
-        group_id: str = "timeline", engine: str | None = None, scene_path: Path | None = None) -> dict:
+        group_id: str = "timeline", engine: str | None = None, scene_path: Path | None = None,
+        page_path: Path | None = None) -> dict:
     started = time.perf_counter()
     raw = request_path.read_bytes()
     code_files = sorted(_HERE.glob("*.py"))
@@ -578,8 +579,24 @@ def run(request_path: Path, out_path: Path, svg_path: Path | None = None, into: 
                "started_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
     result: dict = {"schema": RESULT_SCHEMA}
     request: dict = {}
+    page_layout = None
     try:
         request = json.loads(raw.decode("utf-8"))
+        if isinstance(request, dict) and isinstance(request.get("page"), dict):
+            # whole-page composition (page_compose.py): the page texts are measured first and the chart takes the body
+            # region they leave, so the creator neither assembles SVG nor budgets the page by hand
+            import page_compose
+            page = request.pop("page")
+            style = request.setdefault("style", {})
+            font = {"family": style.get("font_family", "Segoe UI")}
+            if page.get("font_files"):
+                font["files"] = page["font_files"]
+            page_layout = page_compose.compose(page, font)
+            if request.get("bounds") in (None, "auto"):
+                request["bounds"] = dict(page_layout["region"])
+            style.setdefault("header", "compact")
+        elif page_path:
+            raise RequestError("--page needs a `page` block in the request")
         built = build(request, group_id, engine)
     except (ValueError, RequestError) as exc:
         built = {"status": "error", "errors": [str(exc)]}
@@ -607,6 +624,21 @@ def run(request_path: Path, out_path: Path, svg_path: Path | None = None, into: 
             group = built["group_for"](spec_ref, sha256_bytes(raw))
             svg_info.update(page=str(into), action=write_into(into, group, group_id), fragment=group,
                             group_sha256=sha256_bytes(group.encode("utf-8")), request_copy=str(request_copy))
+        if page_layout is not None:
+            import page_compose
+            result["page"] = page_compose.report(page_layout)
+            if page_path:
+                page_path.parent.mkdir(parents=True, exist_ok=True)
+                request_copy = page_path.with_name(f"{page_path.stem}.timeline.request.json")
+                request_copy.write_bytes(raw)
+                group = built["group_for"](request_copy.name, sha256_bytes(raw))
+                page_path.write_text(page_compose.assemble(page_layout, group), encoding="utf-8", newline="\n")
+                svg_info.update(page=str(page_path), action="composed", fragment=group,
+                                group_sha256=sha256_bytes(group.encode("utf-8")), request_copy=str(request_copy))
+            for item in page_layout["residuals"]:
+                built["unsatisfied_constraints"].append({"kind": item["kind"], "detail": item["message"]})
+            if page_layout["residuals"] and status == "ok":
+                status = "partial"
         result.update(status=status, svg=svg_info, scene=built["scene"], capacity=built["capacity"],
                       unsatisfied_constraints=built["unsatisfied_constraints"], notes=built["notes"],
                       measurement=built["measurement"])
@@ -633,6 +665,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out", required=True, help="result JSON: status, receipt, scene, svg fragment, unsatisfied constraints")
     parser.add_argument("--svg", help="also write a previewable 1280x720 SVG holding the group")
     parser.add_argument("--into", help="write the group into this page SVG (replacing the group of --group-id, or before </svg>)")
+    parser.add_argument("--page", help="compose the WHOLE page here from the request's `page` block (template chrome, measured "
+                                       "eyebrow/title/source, the chart in the body region they leave); replaces the file")
     parser.add_argument("--group-id", default="timeline", help="id of the timeline group and prefix of its element ids")
     parser.add_argument("--scene", help="also merge {\"time_scale\": ...} into this scene.json (the creator's work/scene.json)")
     parser.add_argument("--engine", choices=ENGINES, default=None,
@@ -660,7 +694,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"build_timeline: timeline engine {chosen!r} is not part of this package (allowed: {sorted(pinned)})", file=sys.stderr)
         return 2
     result = run(request_path, Path(args.out), Path(args.svg) if args.svg else None,
-                 Path(args.into) if args.into else None, args.group_id, args.engine, Path(args.scene) if args.scene else None)
+                 Path(args.into) if args.into else None, args.group_id, args.engine, Path(args.scene) if args.scene else None,
+                 Path(args.page) if args.page else None)
     receipt = result["receipt"]
     print(f"build_timeline: status={result['status']} elapsed_ms={receipt['elapsed_ms']} out={args.out}")
     for item in result.get("errors") or []:
