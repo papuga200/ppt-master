@@ -182,6 +182,65 @@ def prepare_project(svg: Path, project: Path) -> tuple[Path, list[dict]]:
     return target, notes
 
 
+def normalise_root_bounds(page: Path) -> list[str]:
+    """The fork's exporter requires every visible root-level <g> to declare a `data-pptx-bounds` zone, and ordinary root zones
+    must not overlap. Creators in the experiment are not told this exporter-dialect rule, so the fixed export stage wraps the
+    page's root content outside the template chrome into ONE body group that declares the full canvas - in the temporary copy
+    only; the authored SVG is unchanged. Returns the ids of the root groups it wrapped (empty when nothing was needed)."""
+    import os
+    import stat
+    text = page.read_text(encoding="utf-8-sig")
+    root = re.search(r"<svg\b[^>]*>", text)
+    close = text.rfind("</svg>")
+    if not root or close < 0:
+        return []
+    view = re.search(r'viewBox="\s*([\d.\-]+)[ ,]+([\d.\-]+)[ ,]+([\d.\-]+)[ ,]+([\d.\-]+)', root.group(0))
+    bounds = " ".join(view.groups()) if view else "0 0 1280 720"
+    body = text[root.end():close]
+    spans, depth, start_at, first = [], 0, None, None   # root-level element spans: (start, end, name, attrs)
+    for m in re.finditer(r"<(/?)([A-Za-z][\w:.-]*)((?:[^<>\"']|\"[^\"]*\"|'[^']*')*?)(/?)>", body):
+        closing, name, attrs, selfclose = m.group(1), m.group(2), m.group(3), m.group(4)
+        if closing:
+            depth -= 1
+            if depth == 0 and first is not None:
+                spans.append((start_at, m.end(), first[0], first[1]))
+                first = None
+        else:
+            if depth == 0:
+                if selfclose:
+                    spans.append((m.start(), m.end(), name, attrs))
+                else:
+                    start_at, first = m.start(), (name, attrs)
+            if not selfclose:
+                depth += 1
+    keep_out = {"defs", "style", "title", "desc", "metadata"}
+    def is_chrome(name: str, attrs: str) -> bool:
+        return name == "g" and ('data-pptx-role="chrome"' in attrs or re.search(r'\bid="(chrome|template-chrome)"', attrs) is not None)
+    loose = [s for s in spans if s[2] not in keep_out and not is_chrome(s[2], s[3])]
+    needs = [s for s in loose if s[2] == "g" and "data-pptx-bounds" not in s[3]]
+    if not needs:
+        return []
+    touched = [(re.search(r'\bid="([^"]*)"', s[3]).group(1) if re.search(r'\bid="([^"]*)"', s[3]) else "(no id)") for s in needs]
+    first_start, last_end = loose[0][0], loose[-1][1]
+    inner = body[first_start:last_end]
+    # chrome or defs that sit between body elements stay where they are: only wrap when the body elements are contiguous
+    between = [s for s in spans if first_start <= s[0] < last_end and s not in loose]
+    if between:
+        parts, cursor = [], first_start
+        for s in between:
+            parts.append(body[cursor:s[0]])
+            cursor = s[1]
+        parts.append(body[cursor:last_end])
+        inner = "".join(parts)
+        moved = "".join(body[s[0]:s[1]] for s in between)
+    else:
+        moved = ""
+    wrapped = (body[:first_start] + moved + f'<g id="export-body" data-pptx-bounds="{bounds}">' + inner + "</g>" + body[last_end:])
+    os.chmod(page, stat.S_IWRITE | stat.S_IREAD)  # the copy of a locked (read-only) draft
+    page.write_text(text[:root.end()] + wrapped + text[close:], encoding="utf-8")
+    return touched
+
+
 def pptx_inventory(pptx: Path) -> dict:
     from lxml import etree
     with zipfile.ZipFile(pptx) as archive:
@@ -395,6 +454,11 @@ def render_export(svg: Path, out: Path, *, native: str = "auto", powerpoint: boo
     project = out / "_project"
     page, copies = prepare_project(svg, project)
     result["project"] = {"path": str(project), "page": str(page), "referenced_files": copies}
+    normalised = normalise_root_bounds(page)  # experiment decision D030: the export stage declares root bounds, not the author
+    if normalised:
+        findings.append({"attribution": "exporter_contract", "code": "ROOT_BOUNDS_DECLARED_BY_EXPORT_STAGE", "severity": "info",
+                                   "message": f"{len(normalised)} root-level <g> without data-pptx-bounds: the page body outside the template chrome was wrapped in one "
+                                              f"export-body group declaring the full canvas, in the export copy only (the authored SVG is unchanged): {', '.join(normalised)}"})
     use_native = native == "on" or (native == "auto" and b"data-pptx-replace-with" in data)
     gate = run_step("quality_gate", [str(PYTHON), str(SCRIPTS / "svg_quality_checker.py"), str(project), "--quick-generate",
                                      "--canonical-authoring", "--stage", "final", "--json"], out)
@@ -503,6 +567,7 @@ def build_parser() -> argparse.ArgumentParser:
                                      formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
     parser.add_argument("--svg", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--in", dest="request", type=Path, default=None, help="harness request file (accepted and recorded; the export configuration is fixed)")
     parser.add_argument("--native-charts-and-tables", choices=["auto", "on", "off"], default="auto")
     parser.add_argument("--no-powerpoint", action="store_true", help="skip the PowerPoint render and parity (reported as unverified)")
     return parser
@@ -515,9 +580,17 @@ def main(argv: Optional[list[str]] = None) -> int:
     if not args.svg.is_file():
         print(f"error: no such SVG: {args.svg}", file=sys.stderr)
         return 1
+    # harness call shape (orchestrator integration): `--in request.json --out <file>.json` -> artifacts go to a folder beside the
+    # result file and the result is ALSO written to that file, so the harness finds what it expects
+    result_file = None
+    if str(args.out).lower().endswith(".json"):
+        result_file = Path(args.out)
+        args.out = result_file.parent / "artifacts"
     result = render_export(args.svg, args.out, native=args.native_charts_and_tables, powerpoint=not args.no_powerpoint)
     path = Path(args.out) / "render_export.json"
     digest = common.write_json(path, result)
+    if result_file is not None:
+        common.write_json(result_file, result)
     counts = {}
     for f in result["findings"]:
         counts[f["attribution"]] = counts.get(f["attribution"], 0) + 1
