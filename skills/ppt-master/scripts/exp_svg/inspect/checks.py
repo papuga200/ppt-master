@@ -575,8 +575,10 @@ class Inspector:
                         best = (part, "must_include-partial", absent, " + ".join(must), 2)
             if best and best[0] >= 0.34:
                 found.append({**unit, "score": best[0], "match": best[1], "missing": best[2], "alt": best[3], "via": best[4]})
-        # the item's own wording first, then accepted alternates, then keyword-only acceptance; shorter units first
-        found.sort(key=lambda u: (-u["score"], u["via"], len(u["text"])))
+        # the item's own wording first, then accepted alternates, then keyword-only acceptance; at equal score a whole text
+        # before one line of a longer text (a lane called "Meter data platform" is not the first line of the milestone
+        # "Meter data platform / ready for integration"); then shorter units first
+        found.sort(key=lambda u: (-u["score"], u["via"], 1 if u.get("kind") == "line" else 0, len(u["text"])))
         return found
 
     def _mapped(self, item_id: str, want: str) -> Optional[dict]:
@@ -1764,9 +1766,12 @@ class Inspector:
                 pairs.append((0.0, it, mapped, ex, "mapping"))
                 continue
             prefer = "rule" if it.get("kind") == "gate" else "glyph"  # a decision is usually a rule, an event a glyph
+            # two events on one date are drawn side by side, equally far from the date: the item's own name breaks the tie
+            named = [u for u in self.find_text(it) if u["score"] >= self.threshold][:1]
             for c in cands:
                 d = abs(G.center(c["rect"])[0] - ex)
-                pairs.append((d + (0.0 if c["shape"] == prefer else 0.25 * sc["tolerance_px"]), it, c, ex,
+                tie = 0.002 * min(G.dist_rect_rect(c["rect"], named[0]["rect"]), 400.0) if named else 0.0
+                pairs.append((d + tie + (0.0 if c["shape"] == prefer else 0.25 * sc["tolerance_px"]), it, c, ex,
                               f"geometry search (nearest free {c['shape']})"))
         pairs.sort(key=lambda p: p[0])
         used_i, used_m = set(), set()
