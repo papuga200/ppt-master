@@ -456,7 +456,9 @@ def _classify_paragraph_block(
         if explicit_soft_break == "0":
             break_kind = "paragraph"
         elif explicit_soft_break == "1":
-            break_kind = "soft"
+            # A continuation belongs to the same paragraph in both modes;
+            # preserve retains its visual row, while reflow joins its content.
+            break_kind = "line" if preserve_line_breaks else "soft"
         elif reflow_candidate:
             break_kind = "line" if preserve_line_breaks else "soft"
         else:

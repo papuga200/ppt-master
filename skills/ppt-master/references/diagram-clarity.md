@@ -2,6 +2,8 @@
 
 This is planning guidance for any deck, not a diagram template or a required style. The page's audience question and source-backed claim come first. The visual task says what a reader must **see** to understand the answer. Executor chooses the carrier and geometry. A sentence, photo, annotated screenshot, chart or table may answer better than a diagram.
 
+For diagrams and dense timelines, load [`diagram-planning.md`](./diagram-planning.md) before allocation. It separates the planner's semantic organization and abstraction from the author's carrier, layout family and geometry.
+
 ## Choose the relationship before the form
 
 | Reader needs to understand | Prefer to test first | What must be explicit |
@@ -50,7 +52,7 @@ A diagram is read without a presenter. Every mark states one relationship, and e
 
 **Callouts and keys**
 - Numbered callouts are keyed both ways: every number in the notes column has the same number as a marker on the figure, and every marker on the figure has its note. [lint `UNKEYED_CALLOUT`]
-- A legend explains symbols only (what a dashed line, a colour, a triangle means); it never carries content that could be a direct label.
+- A legend explains symbols only (what a dashed line, a colour, a triangle means); it never carries content that could be a direct label. Draw the actual visual samples per [`diagram-planning.md`](./diagram-planning.md) §4.
 
 **Boundaries, axes and scales**
 - A container or boundary includes exactly what the text says it includes. If the words say "on your machine", every component on the machine is inside the outline and nothing else is.
@@ -58,5 +60,5 @@ A diagram is read without a presenter. Every mark states one relationship, and e
 - One visual level of detail per figure; group only where the grouping means something.
 
 **Laying it out**
-- Flows and architectures with more than four nodes, or with any loop, are laid out with `scripts/diagram_layout.py` (ELK layered, orthogonal routes, labels measured and placed off the lines), then styled. Timelines and Gantt charts are laid out with `scripts/timeline_layout.py spec.json --into <page.svg>`, which writes the chart into the page as one hashed group that is changed only by editing its spec and running it again (consulting-typesetting.md §6). Both print JSON coordinates and an SVG fragment in this contract.
+- Choose the construction capability through [`svg-creation-tools.md`](./svg-creation-tools.md). Measured native architecture scenes and dated dense timelines coexist with the original ELK diagram and numeric-horizon timeline helpers. Keep one authoritative request per helper-built diagram and regenerate after changes; [`svg-creation-tools.md`](./svg-creation-tools.md) §2 defines the source/compiler contract.
 - Arrows that are straight or bend at right angles between two boxes become native connectors glued to both boxes after export (`pptx_text_in_shapes.py`): draw them as one `<line>`, or one `<path>` of horizontal and vertical segments (`M x y H .. V .. H ..`) whose ends sit on the box edges.

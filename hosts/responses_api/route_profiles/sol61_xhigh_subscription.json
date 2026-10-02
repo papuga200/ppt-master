@@ -1,0 +1,12 @@
+{
+  "workhorse": {
+    "model": "gpt-6.1-sol",
+    "effort": "xhigh",
+    "api_base": "cli:codex"
+  },
+  "frontier": {
+    "model": "gpt-6.1-sol",
+    "effort": "xhigh",
+    "api_base": "cli:codex"
+  }
+}

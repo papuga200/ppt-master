@@ -353,7 +353,13 @@ def arrow_findings(svg_arrows: list[dict], pptx_lines: list[dict]) -> list[dict]
                 d = math.hypot(pt[0] - a["tip"][0], pt[1] - a["tip"][1])
                 if a.get("id") and ln.get("name") == a["id"]:
                     d -= 0.001
-                if d < best_d:
+                # A return path may start and end at the same coordinate. Both
+                # tips then match equally: prefer the endpoint that actually
+                # carries a marker, rather than whichever was iterated first.
+                coincident_marker = (best is ln and abs(d - best_d) < 1e-9
+                                     and ln.get(key) is not None
+                                     and best.get(end_key) is None)
+                if d < best_d or coincident_marker:
                     best, best_d, end_key = ln, d, key
         row = {"svg_ref": a["ref"], "svg_end": a["which"], "tip_px": [round(v, 1) for v in a["tip"]], "svg_marker_len_px": a["marker_len_px"],
                "svg_orient": a["orient"], "attribution": "conversion"}
@@ -432,16 +438,22 @@ def token_retention(svg_texts: list[str], pptx_texts: list[str]) -> dict:
             "missing_in_pptx": dict(missing), "extra_in_pptx": dict(extra), "equal": not missing and not extra}
 
 
-def render_export(svg: Path, out: Path, *, native: str = "auto", powerpoint: bool = True) -> dict:
+def render_export(svg: Path, out: Path, *, native: str = "auto", powerpoint: bool = True, require_native_editability: bool = False) -> dict:
     started = time.perf_counter()
     svg = Path(svg).resolve()
     out = Path(out).resolve()
     out.mkdir(parents=True, exist_ok=True)
     data = svg.read_bytes()
+    from xml.etree import ElementTree as ET
+    require_editability = require_native_editability or ET.fromstring(data).get('data-native-editability-required') == 'true'
+    import native_editability
+    source_editability = native_editability.audit(svg) if require_editability else None
     art = {"path": str(svg), "sha256": common.sha256_bytes(data), "bytes": len(data)}
     steps, findings = [], []
     result = {"artifact": art, "config": {"exporter": "svg_to_pptx.py --quick-generate --no-animations", "native_charts_and_tables": native,
                                          "preview_width_px": PREVIEW_W, "powerpoint": powerpoint}}
+    if source_editability is not None:
+        result['native_editability'] = {'required': True, 'source': source_editability}
     # 1. SVG preview + geometry
     from svg_geometry import Browser
     t0 = time.perf_counter()
@@ -468,6 +480,10 @@ def render_export(svg: Path, out: Path, *, native: str = "auto", powerpoint: boo
         errs = [ln.strip() for ln in _log_tail(gate["stdout"], 80) if "[ERROR]" in ln and "With errors" not in ln and " - Failed" not in ln]
         findings.append({"code": "EXPORT_GATE_REFUSED", "severity": "blocker", "attribution": "exporter_contract",
                          "message": "the fork's SVG contract gate refused the page, so no native PPTX was produced", "details": errs[:20]})
+    elif source_editability is not None and source_editability['status'] != 'passed':
+        findings.append({'code':'NATIVE_EDITABILITY_SOURCE_REFUSED', 'severity':'blocker', 'attribution':'authoring_contract',
+                         'message':'The SVG does not preserve the required native object ownership; no fragmented PPTX export was produced.',
+                         'details':source_editability['findings']})
     else:
         cmd = [str(PYTHON), str(SCRIPTS / "svg_to_pptx.py"), str(project), "-o", str(pptx), "--quick-generate", "--no-animations"]
         if use_native:
@@ -479,6 +495,13 @@ def render_export(svg: Path, out: Path, *, native: str = "auto", powerpoint: boo
                              "message": "svg_to_pptx.py failed on a page its gate accepted", "details": _log_tail(exp["stderr"]) + _log_tail(exp["stdout"])})
     # 4. native inventory, text retention, arrowheads (XML)
     if pptx.is_file():
+        if require_editability:
+            exported_editability = native_editability.audit(svg, pptx)
+            result['native_editability']['export'] = exported_editability
+            if exported_editability['status'] != 'passed':
+                findings.append({'code':'NATIVE_EDITABILITY_EXPORT_FAILED','severity':'blocker','attribution':'conversion',
+                                 'message':'Exported PowerPoint ownership, paragraphs or tables differ from the declared native objects.',
+                                 'details':exported_editability['findings']})
         inv = pptx_inventory(pptx)
         slide = inv["slides"][0] if inv["slides"] else {}
         model = C.Model(geometry, C.parse_defs(data))
@@ -549,6 +572,8 @@ def render_export(svg: Path, out: Path, *, native: str = "auto", powerpoint: boo
     exported = pptx.is_file()
     rendered = bool(result.get("pptx_render"))
     status = "ok" if exported and (rendered or not powerpoint) and not any(f["code"] in ("PARITY_FAILED", "PARITY_UNAVAILABLE") for f in findings) else ("partial" if exported else "error")
+    if any(f['code'] == 'NATIVE_EDITABILITY_EXPORT_FAILED' for f in findings):
+        status = 'partial'
     env = common.envelope(TOOL, input_hash=art["sha256"], status=status, started=started)
     env.update(result)
     env["steps"] = steps
@@ -569,6 +594,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--in", dest="request", type=Path, default=None, help="harness request file (accepted and recorded; the export configuration is fixed)")
     parser.add_argument("--native-charts-and-tables", choices=["auto", "on", "off"], default="auto")
+    parser.add_argument('--require-native-editability', action='store_true', help='require native semantic ownership before and after export')
     parser.add_argument("--no-powerpoint", action="store_true", help="skip the PowerPoint render and parity (reported as unverified)")
     return parser
 
@@ -586,7 +612,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     if str(args.out).lower().endswith(".json"):
         result_file = Path(args.out)
         args.out = result_file.parent / "artifacts"
-    result = render_export(args.svg, args.out, native=args.native_charts_and_tables, powerpoint=not args.no_powerpoint)
+    result = render_export(args.svg, args.out, native=args.native_charts_and_tables, powerpoint=not args.no_powerpoint,
+                           require_native_editability=args.require_native_editability)
     path = Path(args.out) / "render_export.json"
     digest = common.write_json(path, result)
     if result_file is not None:

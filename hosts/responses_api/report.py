@@ -26,6 +26,8 @@ import sys
 from pathlib import Path
 
 PRICES = {  # USD per token; OpenRouter's listing, September 2026
+    # Verified 2026-10-03: https://developers.openai.com/api/docs/models/gpt-6.1-sol
+    "gpt-6.1-sol": (2.0e-6, 0.1e-6, 10.0e-6),
     "gpt-5.6-luna": (0.2e-6, 0.02e-6, 1.2e-6),
     "gpt-5.6-sol": (2.0e-6, 0.2e-6, 10.0e-6),
     "gpt-6-sol": (2.0e-6, 0.2e-6, 10.0e-6),
@@ -46,7 +48,10 @@ def cost_of(model: str, input_tokens: int, cached: int, output_tokens: int, back
     if not prices:
         return None, COST_UNKNOWN
     p_in, p_cached, p_out = prices
-    cost = max(0, input_tokens - cached) * p_in + cached * p_cached + output_tokens * p_out
+    long_request = model.split("/")[-1] == "gpt-6.1-sol" and input_tokens > 272_000
+    input_multiplier, output_multiplier = (2.0, 1.5) if long_request else (1.0, 1.0)
+    cost = (input_multiplier * (max(0, input_tokens - cached) * p_in + cached * p_cached)
+            + output_tokens * p_out * output_multiplier)
     return cost, (COST_NOTIONAL if str(backend or "").startswith("cli:") else COST_BILLED)
 _REVIEW_TIME = re.compile(r"\[review\] .*?\((\d+)s\)")
 

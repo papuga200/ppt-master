@@ -13,6 +13,7 @@ Dependencies:
 from __future__ import annotations
 
 import re
+import math
 from datetime import date
 from xml.sax.saxutils import escape
 
@@ -165,6 +166,19 @@ def normalise(request: dict) -> tuple[dict | None, list, list]:
     if bounds["x"] < 0 or bounds["y"] < 0 or bounds["x"] + bounds["w"] > 1280 or bounds["y"] + bounds["h"] > 720:
         problems.append("bounds must lie inside the 1280 x 720 canvas")
     style = request.get("style") or {}
+    pad_y_min = style.get("bar_pad_y_min")
+    if "bar_pad_y_min" in style:
+        if (isinstance(pad_y_min, bool) or not isinstance(pad_y_min, (int, float))
+                or not math.isfinite(pad_y_min) or pad_y_min < 0):
+            problems.append("style.bar_pad_y_min must be a finite non-negative number")
+    pad_y = float(style.get("bar_pad_y", 4))
+    if not problems and pad_y_min is not None and style.get("bar_mode", "labelled") != "thin":
+        if not math.isfinite(pad_y):
+            problems.append("style.bar_pad_y must be finite when bar_pad_y_min is declared")
+        elif pad_y < pad_y_min:
+            notes.append({"kind": "style_raised", "detail":
+                          f"style.bar_pad_y {pad_y:g} px raised to the floor {pad_y_min:g} px"})
+            pad_y = pad_y_min
     floors = {**DEFAULT_FLOORS, **(request.get("floors") or {})}
     floor = float(floors["label_px"])
     if floor < ABSOLUTE_TIMELINE_LABEL_FLOOR_PX - 1e-9:
@@ -183,9 +197,12 @@ def normalise(request: dict) -> tuple[dict | None, list, list]:
             "tasks": tasks, "markers": markers, "windows": windows, "dependencies": deps,
             "edge_labels": ruler.get("edge_labels") or [], "legend": request.get("legend") or [],
             "colors": style.get("colors") or {}, "bar_pad_x": float(style.get("bar_pad_x", 8)),
-            "bar_pad_y": float(style.get("bar_pad_y", 4)), "name_max_lines": int(style.get("name_max_lines", 3)),
+            "bar_pad_y": pad_y, "name_max_lines": int(style.get("name_max_lines", 3)),
             "bar_mode": style.get("bar_mode", "labelled"), "bar_h_thin": float(style.get("bar_h_thin", 10)),
-            "header": style.get("header", "stacked"), "rev2": bool(style.get("rev2"))}
+            "header": style.get("header", "stacked"), "rev2": bool(style.get("rev2")),
+            "native_text_ownership": bool(style.get("native_text_ownership"))}
+    if pad_y_min is not None:
+        spec["bar_pad_y_min"] = float(pad_y_min)
     if style.get("lane_label_w"):
         spec["lane_label_w"] = float(style["lane_label_w"])
     return spec, [], notes

@@ -60,7 +60,10 @@ CODEX_DISABLED_FEATURES = ("shell_tool", "unified_exec", "apps", "plugins", "mul
                            "skill_mcp_dependency_install", "remote_plugin")
 # Notional prices for tokens a subscription CLI reports (USD per token: input, cached input, output). The report's table wins
 # where it knows the model (hosts/responses_api/report.py PRICES).
-NOTIONAL_PRICES = {"gpt-6-sol": (2.0e-6, 0.2e-6, 10.0e-6)}
+NOTIONAL_PRICES = {
+    "gpt-6-sol": (2.0e-6, 0.2e-6, 10.0e-6),
+    "gpt-6.1-sol": (2.0e-6, 0.1e-6, 10.0e-6),
+}
 
 
 class SubscriptionError(RuntimeError):
@@ -159,12 +162,17 @@ def price_of(model: str) -> tuple[float, float, float] | None:
     return NOTIONAL_PRICES.get(model)
 
 
-def notional_cost(model: str, input_tokens: int, cached: int, output_tokens: int) -> tuple[float | None, str]:
+def notional_cost(model: str, input_tokens: int, cached: int, output_tokens: int,
+                  cache_write: int = 0) -> tuple[float | None, str]:
     prices = price_of(model)
     if not prices:
         return None, COST_UNKNOWN
     p_in, p_cached, p_out = prices
-    return (max(0, input_tokens - cached) * p_in + cached * p_cached + output_tokens * p_out), COST_NOTIONAL
+    long_request = model.split("/")[-1] == "gpt-6.1-sol" and input_tokens > 272_000
+    input_multiplier, output_multiplier = (2.0, 1.5) if long_request else (1.0, 1.0)
+    return (input_multiplier * (max(0, input_tokens - cached - cache_write) * p_in
+                               + cached * p_cached + cache_write * p_in * 1.25)
+            + output_tokens * p_out * output_multiplier), COST_NOTIONAL
 
 
 # --- Claude stream-json ------------------------------------------------------------------------------------------------
@@ -265,10 +273,14 @@ def codex_home() -> Path:
     return Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
 
 
-def codex_base_argv(model: str, effort: str | None, instructions_file: Path | None) -> list[str]:
+def codex_base_argv(model: str, effort: str | None, instructions_file: Path | None, *, reasoning_summary: str | None = None) -> list[str]:
     argv = ["--json", "--skip-git-repo-check", "--ignore-user-config", "--ignore-rules", "-m", model,
             "-c", 'approval_policy="never"', "-c", "project_doc_max_bytes=0", "-c", 'web_search="disabled"',
             "-c", "include_apps_instructions=false"]
+    if reasoning_summary is not None:
+        if reasoning_summary not in {"auto", "concise", "detailed", "none"}:
+            raise ValueError("Invalid model_reasoning_summary setting")
+        argv += ["-c", f'model_reasoning_summary="{reasoning_summary}"']
     if effort in CODEX_EFFORTS:
         argv += ["-c", f'model_reasoning_effort="{effort}"']
     if instructions_file:
@@ -281,9 +293,23 @@ def codex_base_argv(model: str, effort: str | None, instructions_file: Path | No
 def codex_usage(usage: dict | None, model: str, calls: int) -> dict:
     usage = usage or {}
     inp, cached, out = usage.get("input_tokens") or 0, usage.get("cached_input_tokens") or 0, usage.get("output_tokens") or 0
-    cost, source = notional_cost(model, inp, cached, out)
+    cost, source = notional_cost(model, inp, cached, out, usage.get("cache_write_input_tokens") or 0)
     return {"input_tokens": inp, "cached": cached, "cache_write": usage.get("cache_write_input_tokens") or 0, "output_tokens": out,
             "reasoning": usage.get("reasoning_output_tokens") or 0, "calls": calls, "cost_usd": cost, "cost_source": source}
+
+
+def codex_request_usage(calls: list[dict], model: str) -> dict:
+    """Price each recorded request separately; invocation totals are not context sizes."""
+    requests = [codex_usage(call.get("usage"), model, 1) for call in calls]
+    total = {key: sum(row[key] for row in requests)
+             for key in ("input_tokens", "cached", "cache_write", "output_tokens", "reasoning", "calls")}
+    known = bool(requests) and all(row["cost_usd"] is not None for row in requests)
+    total.update(cost_usd=sum(row["cost_usd"] for row in requests) if known else None,
+                 cost_source=COST_NOTIONAL if known else COST_UNKNOWN,
+                 cost_basis="standard-api-equivalent-per-request",
+                 pricing_source="https://developers.openai.com/api/docs/models/gpt-6.1-sol"
+                 if model.split("/")[-1] == "gpt-6.1-sol" else None)
+    return total
 
 
 def codex_rollout(thread_id: str, home: Path | None = None) -> Path | None:
@@ -436,7 +462,8 @@ def review_codex(payload: dict, run=None) -> tuple[str, dict]:
         raise CliCallError(f"codex exec review failed (exit {code}): {'; '.join(parsed['errors'])[:300]} {stderr.strip()[-300:]}")
     rollout = codex_rollout(parsed["thread_id"] or "")
     audit = read_rollout(rollout, since) if rollout else {"calls": [], "rate_limit": None, "context": {}}
-    usage = codex_usage(parsed["usage"], model, calls=len(audit["calls"]) or 1)
+    usage = (codex_request_usage(audit["calls"], model) if audit["calls"]
+             else codex_usage(parsed["usage"], model, calls=1))
     return (text or (parsed["texts"][-1] if parsed["texts"] else "")), {
         "input_tokens": usage["input_tokens"], "cached_tokens": usage["cached"], "output_tokens": usage["output_tokens"],
         "reasoning_tokens": usage["reasoning"], "cost": usage["cost_usd"], "cost_source": usage["cost_source"], "backend": "cli:codex",

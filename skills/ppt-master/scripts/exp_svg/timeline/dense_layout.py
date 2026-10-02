@@ -167,6 +167,7 @@ class DenseLayout:
         self.extent_days = float(spec["extent_days"])  # scale length (>= horizon when items lie beyond it)
         self.line_h = self.size * LINE
         self.thin = spec.get("bar_mode") == "thin"   # thin bars: every label beside (or above) its bar, rows one text line high
+        self.native_text_ownership = bool(spec.get("native_text_ownership"))
         self.thin_h = float(spec.get("bar_h_thin", 10.0))
         self.rev2 = bool(spec.get("rev2"))  # 0.5.0 behaviour: dependencies painted over the bars and routed to stay visible
         self.legend_mode = "bottom"
@@ -721,8 +722,18 @@ class DenseLayout:
         densities = self.spec.get("densities") or [(6, 8), (4, 6), (3, 4), (2, 3), (2, 2), (1, 1)]
         best_fail = None
         asked = float(self.spec.get("bar_pad_y", 4.0))
+        floor = self.spec.get("bar_pad_y_min") if not self.thin else None
+        if floor is not None:
+            if (isinstance(floor, bool) or not isinstance(floor, (int, float))
+                    or not math.isfinite(floor) or floor < 0):
+                raise ValueError("bar_pad_y_min must be a finite non-negative number")
+            asked = max(asked, float(floor))
         # compact: when nothing fits at the asked bar padding, tighter padding is tried before reporting a capacity failure
         pads = [asked] + ([p for p in (3.0, 2.0, 1.0) if p < asked] if self.compact and not self.thin else [])
+        if floor is not None:
+            pads = [p for p in pads if p >= floor]
+            if self.compact and floor < asked and floor not in pads:
+                pads.append(float(floor))
         for pad_y, (row_gap, lane_pad) in [(p, d) for p in pads for d in densities]:
             self.pad_y = pad_y
             fits = []
@@ -1210,9 +1221,17 @@ class DenseLayout:
         # 6 bars and labels, lane events
         for t in self.tasks:
             fill = t.style.get("fill") or c["bar"]
-            out.append(f'<rect{attrs("task:" + t.id, "bar", f"{prefix}-task-{t.id}")} x="{t.x0:.2f}" y="{t.y:.2f}" width="{t.x1 - t.x0:.2f}" height="{t.h:.2f}" fill="{fill}"/>')
+            owned = self.native_text_ownership and t.label.where == "inside" and not t.label.rot
+            carrier = ' data-pptx-part="geometry"' if owned else ""
+            if owned:
+                out.append(f'<g id="{prefix}-task-{escape(t.id)}-owner" data-pptx-semantic-object="shape" '
+                           f'data-name="{prefix}-task-{escape(t.id)}" data-content-id="task:{escape(t.id)}" '
+                           f'data-pptx-frame="{t.x0:.2f} {t.y:.2f} {t.x1 - t.x0:.2f} {t.h:.2f}">')
+            out.append(f'<rect{carrier}{attrs("task:" + t.id, "bar", f"{prefix}-task-{t.id}")} x="{t.x0:.2f}" y="{t.y:.2f}" width="{t.x1 - t.x0:.2f}" height="{t.h:.2f}" fill="{fill}"/>')
             colour = (t.style.get("text") or c["bar_text"]) if t.label.where == "inside" else c["text"]
             out.append(text(t.label, "task:" + t.id, "bar-label", colour, f"{prefix}-task-{t.id}-label"))
+            if owned:
+                out.append('</g>')
         if self.rev2:
             out.extend(dep_svg)
         for e in self.events:

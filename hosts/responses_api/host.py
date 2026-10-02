@@ -35,12 +35,14 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import http.client
 import json
 import os
 import subprocess
 import sys
 import time
+import uuid
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -101,7 +103,7 @@ def _inside(path: str) -> Path:
     return resolved
 
 
-# --- EXPERIMENT-ONLY (svg-helpers-experiment-20260930, branch exp/svg-helpers-20260930; never merged to production) ----------------
+# --- Optional creator workspace guards (retained from SVG helper qualification) ----------------
 # Three opt-in guards for an isolated creator session. Each is read at call time; when its variable is unset the host behaves exactly
 # as before.
 #   PPT_MASTER_SCRIPT_ALLOWLIST  `;`-separated script paths relative to skills/ppt-master/scripts (e.g. `exp_svg/inspect/submit_check.py`).
@@ -184,20 +186,60 @@ def _read_denied(target: Path) -> bool:
     return any(fnmatch(rel, pattern) for pattern in READ_DENY)
 
 
-def tool_read_file(path: str, start: int = 1, end: int | None = None) -> str:
+def _text_page(text: str, path: str, offset: int, limit: int) -> str:
+    """A JSON transport page, bounded after escaping rather than before it."""
+    length = min(limit, MAX_TOOL_OUTPUT // 2, len(text) - offset)
+    while True:
+        next_offset = offset + length
+        result = json.dumps({
+            "schema": "ppt-master.tool-result.v1", "type": "text_page", "path": path,
+            "content": text[offset:next_offset], "offset": offset, "length": length,
+            "next_offset": next_offset if next_offset < len(text) else None,
+            "total_chars": len(text), "complete": next_offset == len(text),
+            "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            "usage": "Append content in offset order; call read_file(path, offset=next_offset, limit=30000) "
+                     "until complete, verify sha256 of UTF-8 text, then parse reconstructed JSON if needed.",
+        }, ensure_ascii=False)
+        if len(result) <= MAX_TOOL_OUTPUT:
+            return result
+        if not length:
+            raise ValueError("text page metadata exceeds the host output cap")
+        length //= 2
+
+
+def tool_read_file(path: str, start: int | None = None, end: int | None = None,
+                   offset: int | None = None, limit: int | None = None) -> str:
     target = _inside(path)
-    _check_roots(target, "PPT_MASTER_READ_ROOTS", "read_file", path)  # EXPERIMENT-ONLY guard (no-op when unset)
+    _check_roots(target, "PPT_MASTER_READ_ROOTS", "read_file", path)  # Optional workspace guard (no-op when unset)
     if _read_denied(target):
         return "not readable by the author: this is script source. The workflow documents under skills/ppt-master (SKILL.md, workflows/, references/, scripts/docs/) say what each script does; run it with run_script."
+    paging = offset is not None or limit is not None
+    if paging and (start is not None or end is not None):
+        raise ValueError("use character offset/limit or line start/end, never both")
+    if paging and (type(offset if offset is not None else 0) is not int or
+                   type(limit if limit is not None else 30000) is not int):
+        raise ValueError("offset and limit must be integers")
     if target.is_dir():
-        return "\n".join(sorted(p.name + ("/" if p.is_dir() else "") for p in target.iterdir()))
-    if target.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp"):
-        return "this is an image: use read_image to see it"
-    text = target.read_text(encoding="utf-8", errors="replace")
+        text = "\n".join(sorted(p.name + ("/" if p.is_dir() else "") for p in target.iterdir()))
+    else:
+        if target.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp"):
+            return "this is an image: use read_image to see it"
+        with target.open(encoding="utf-8", errors="replace", newline="") as handle:
+            text = handle.read()
+    if paging:
+        offset = 0 if offset is None else offset
+        limit = 30000 if limit is None else limit
+        if offset < 0 or offset > len(text) or limit <= 0:
+            raise ValueError("offset must be within the text and limit must be positive")
+        return _text_page(text, path, offset, limit)
     lines = text.splitlines()
     end = end or len(lines)
-    chunk = "\n".join(lines[max(0, start - 1):end])
-    return chunk[:MAX_TOOL_OUTPUT] + ("\n...[truncated]" if len(chunk) > MAX_TOOL_OUTPUT else "")
+    chunk = "\n".join(lines[max(0, (start or 1) - 1):end])
+    if len(chunk) <= MAX_TOOL_OUTPUT:
+        return chunk
+    if start is not None or end != len(lines):
+        raise ValueError("line range exceeds the host cap; use character offset/limit paging")
+    return _text_page(text, path, 0, 30000)
 
 
 def _own_page_only(target: Path, path: str) -> None:
@@ -213,10 +255,23 @@ def _own_page_only(target: Path, path: str) -> None:
                          "Write and edit your page under that name.")
 
 
+def _first_draft_guard(target: Path, tool: str) -> None:
+    """Experimental fresh fixtures freeze their first slide; ordinary hosts are unchanged."""
+    project = os.environ.get("PPT_MASTER_PROJECT_PATH")
+    page = os.environ.get("PPT_MASTER_PAGE_FILE")
+    if not project or not page or target != _inside(page) or not target.exists():
+        return
+    canvas = ROOT / project / "inputs/fixture/canvas.json"
+    if canvas.is_file() and json.loads(canvas.read_text(encoding="utf-8")).get("first_draft_only"):
+        _guard_log({"event": "refused", "guard": "first_draft_only", "tool": tool, "path": str(target)})
+        raise ValueError("The complete slide has been delivered. No rewriting is allowed in this single-delivery assignment; return the artifact and unresolved findings.")
+
+
 def tool_write_file(path: str, content: str) -> str:
     target = _inside(path)
-    _check_roots(target, "PPT_MASTER_WRITE_ROOTS", "write_file", path)  # EXPERIMENT-ONLY guard (no-op when unset)
+    _check_roots(target, "PPT_MASTER_WRITE_ROOTS", "write_file", path)  # Optional workspace guard (no-op when unset)
     _own_page_only(target, path)
+    _first_draft_guard(target, "write_file")
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
     return f"wrote {len(content)} characters to {target.relative_to(ROOT)}"
@@ -225,8 +280,9 @@ def tool_write_file(path: str, content: str) -> str:
 def tool_edit_file(path: str, old: str, new: str) -> str:
     """Exact replacement of one unique passage: a local revision never re-sends the whole page."""
     target = _inside(path)
-    _check_roots(target, "PPT_MASTER_WRITE_ROOTS", "edit_file", path)  # EXPERIMENT-ONLY guard (no-op when unset)
+    _check_roots(target, "PPT_MASTER_WRITE_ROOTS", "edit_file", path)  # Optional workspace guard (no-op when unset)
     _own_page_only(target, path)
+    _first_draft_guard(target, "edit_file")
     text = target.read_text(encoding="utf-8")
     count = text.count(old)
     if count != 1:
@@ -237,7 +293,7 @@ def tool_edit_file(path: str, old: str, new: str) -> str:
 
 def tool_list_dir(path: str = ".") -> str:
     target = _inside(path)
-    _check_roots(target, "PPT_MASTER_READ_ROOTS", "list_dir", path)  # EXPERIMENT-ONLY guard (no-op when unset)
+    _check_roots(target, "PPT_MASTER_READ_ROOTS", "list_dir", path)  # Optional workspace guard (no-op when unset)
     rows = []
     for p in sorted(target.rglob("*")):
         if any(part in (".venv", ".git", "__pycache__") for part in p.parts):
@@ -249,10 +305,7 @@ def tool_list_dir(path: str = ".") -> str:
     return "\n".join(rows)
 
 
-SCRIPT_TIMEOUT_FLOOR_S = 1200
-
-
-def tool_run_script(script: str, args: list[str] | None = None, timeout_s: int = 900) -> str:
+def tool_run_script(script: str, args: list[str] | None = None, timeout_s: int | None = None) -> str:
     script = script.replace("\\", "/")
     for prefix in ("skills/ppt-master/scripts/", str(SCRIPTS).replace("\\", "/") + "/"):
         if script.startswith(prefix):
@@ -262,8 +315,8 @@ def tool_run_script(script: str, args: list[str] | None = None, timeout_s: int =
         raise ValueError("only the skill's own scripts may be run")
     if not script_path.is_file():
         raise ValueError(f"no such script: {script}")
-    _check_script_allowed(script_path.relative_to(SCRIPTS).as_posix())  # EXPERIMENT-ONLY guard (no-op when unset)
-    _check_script_args([str(item) for item in args or []])  # EXPERIMENT-ONLY guard (no-op when unset)
+    _check_script_allowed(script_path.relative_to(SCRIPTS).as_posix())  # Optional workspace guard (no-op when unset)
+    _check_script_args([str(item) for item in args or []])  # Optional workspace guard (no-op when unset)
     safe_args = []
     for item in args or []:
         if item.startswith("-"):
@@ -273,20 +326,47 @@ def tool_run_script(script: str, args: list[str] | None = None, timeout_s: int =
             looks_like_path = " " not in item and ("/" in item or "\\" in item)
             safe_args.append(str(candidate) if candidate.exists() or looks_like_path else item)
     started = time.monotonic()
-    # The author picks a timeout per call, and a short one (120 s) killed an independent review that was still working - the call was
-    # billed and its verdict lost (Harrowgate, 24 Sep 2026). A review or a render under load is bounded by the script itself, so the
-    # author may lengthen the wait but never shorten it below this floor.
-    timeout_s = max(int(timeout_s or 0), SCRIPT_TIMEOUT_FLOOR_S)
+    # Keep the legacy argument readable by older sessions, but do not make a model-selected wait
+    # an execution deadline. A script may itself launch an authorized reviewer/CLI; killing its
+    # wrapper loses the verdict/accounting and can orphan its worker. Explicit human cancellation
+    # remains available. Connection and tool polling intervals are separate from this lifetime.
     # stdin is empty: under the MCP tool server the host's stdin is the JSON-RPC channel, and a script reading `--input -` consumed it and
     # froze every later tool call of the session (campaign F01-c2-a P06: `preset_shape_svg.py render-batch --input -`, ~15 min lost)
     proc = subprocess.run(
         [str(PY), str(script_path), *safe_args], cwd=str(ROOT), env=_env_for_scripts(), stdin=subprocess.DEVNULL,
-        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout_s,
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=None,
     )
     _attach_printed_images(proc.stdout)
-    out = proc.stdout[-MAX_TOOL_OUTPUT // 2:]
-    err = proc.stderr[-MAX_TOOL_OUTPUT // 2:]
-    return f"exit {proc.returncode} in {time.monotonic() - started:.1f}s\n--- stdout ---\n{out}\n--- stderr ---\n{err}"
+    elapsed = round(time.monotonic() - started, 1)
+    result = f"exit {proc.returncode} in {elapsed:.1f}s\n--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"
+    if len(result) <= MAX_TOOL_OUTPUT:
+        return result
+    roots = _roots("PPT_MASTER_READ_ROOTS")
+    project = os.environ.get("PPT_MASTER_PROJECT_PATH")
+    workspace = _inside(project) if project else (roots[0] if roots else ROOT)
+    artifact_dir = _inside(str(workspace / "work" / "tool-results" / uuid.uuid4().hex))
+    _check_roots(artifact_dir, "PPT_MASTER_READ_ROOTS", "run_script", str(artifact_dir))
+    if any(_read_denied(artifact_dir / (name + ".txt")) for name in ("stdout", "stderr")):
+        raise ValueError("session read-deny policy prevents reading retained script output")
+    # Host-owned output artifacts do not grant the author any additional write permissions.
+    artifact_dir.mkdir(parents=True, exist_ok=False)
+    streams = {}
+    for name, content in (("stdout", proc.stdout), ("stderr", proc.stderr)):
+        data = content.encode("utf-8")
+        target = artifact_dir / (name + ".txt")
+        target.write_bytes(data)
+        streams[name] = {"path": target.relative_to(ROOT).as_posix(), "total_chars": len(content),
+                         "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+    reference = json.dumps({
+        "schema": "ppt-master.tool-result.v1", "type": "script_output_reference",
+        "exit_code": proc.returncode, "elapsed_s": elapsed, "complete": False,
+        "stdout": streams["stdout"], "stderr": streams["stderr"],
+        "usage": "Full stdout/stderr are retained at these paths. Read each with read_file(path, offset=0, "
+                 "limit=30000), append content in offset order until complete, verify sha256, then parse JSON.",
+    }, ensure_ascii=False)
+    if len(reference) > MAX_TOOL_OUTPUT:
+        raise ValueError(f"script output reference exceeds the host cap; full output retained in {artifact_dir}")
+    return reference
 
 
 PENDING_IMAGES: list[tuple[str, bytes]] = []
@@ -330,7 +410,7 @@ def _attach_printed_images(stdout: str) -> None:
 
 def tool_read_image(path: str) -> str:
     target = _inside(path)
-    _check_roots(target, "PPT_MASTER_READ_ROOTS", "read_image", path)  # EXPERIMENT-ONLY guard (no-op when unset)
+    _check_roots(target, "PPT_MASTER_READ_ROOTS", "read_image", path)  # Optional workspace guard (no-op when unset)
     if target.suffix.lower() not in (".png", ".jpg", ".jpeg", ".webp"):
         raise ValueError("read_image takes a PNG, JPEG or WebP file")
     data = target.read_bytes()
@@ -341,8 +421,8 @@ def tool_read_image(path: str) -> str:
 
 
 TOOLS = [
-    {"type": "function", "name": "read_file", "description": "Read a text file (or list a directory) inside the ppt-master checkout. Paths are relative to the checkout root. Optional 1-based line range.",
-     "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "start": {"type": "integer"}, "end": {"type": "integer"}}, "required": ["path"]}},
+    {"type": "function", "name": "read_file", "description": "Read text or list a directory inside the checkout. Short reads return raw text. Optional 1-based start/end lines OR 0-based offset/limit characters; never combine them. Large reads and all character pages return JSON text_page envelopes: append content, continue at next_offset until complete, verify sha256, then parse reconstructed JSON. Oversized line ranges require character paging.",
+     "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "start": {"type": "integer"}, "end": {"type": "integer"}, "offset": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1}}, "required": ["path"]}},
     {"type": "function", "name": "read_image", "description": "Look at an image file (PNG/JPEG/WebP) inside the checkout; it is shown to you with the next message.",
      "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}},
     {"type": "function", "name": "write_file", "description": "Write a text file inside the ppt-master checkout.",
@@ -351,7 +431,7 @@ TOOLS = [
      "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "old": {"type": "string"}, "new": {"type": "string"}}, "required": ["path", "old", "new"]}},
     {"type": "function", "name": "list_dir", "description": "Recursive listing of a directory inside the checkout.",
      "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": []}},
-    {"type": "function", "name": "run_script", "description": "Run one of the skill's own scripts (a path under skills/ppt-master/scripts, e.g. svg_to_pptx.py or confirm_ui/server.py) with arguments, in the checkout's Python. Returns exit code, stdout and stderr.",
+    {"type": "function", "name": "run_script", "description": "Run a skill script under skills/ppt-master/scripts with arguments. Short results return exit code, stdout and stderr. Oversized results return a JSON script_output_reference with exit_code and full stdout/stderr artifact paths, hashes and sizes beneath workspace/work/tool-results; retrieve them with read_file character paging before parsing JSON.",
      "parameters": {"type": "object", "properties": {"script": {"type": "string"}, "args": {"type": "array", "items": {"type": "string"}}, "timeout_s": {"type": "integer"}}, "required": ["script"]}},
 ]
 HANDLERS = {"read_file": tool_read_file, "read_image": tool_read_image, "write_file": tool_write_file, "edit_file": tool_edit_file, "list_dir": tool_list_dir, "run_script": tool_run_script}

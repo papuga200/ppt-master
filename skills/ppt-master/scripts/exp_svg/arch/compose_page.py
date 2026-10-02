@@ -46,6 +46,7 @@ Dependencies:
 
 from __future__ import annotations
 
+import copy
 import sys
 from pathlib import Path
 
@@ -239,6 +240,10 @@ def _draw_buses(scene: dict, buses: dict, bus_edges: list[dict]) -> tuple[str, l
                      f'd="{sc.path_d(drawn)}" fill="none" stroke="{es["stroke"]}" '
                      f'stroke-width="{es.get("width", 1.5)}"{dash}{head}/>')
         rec = report.setdefault(item["bus"], {"x": round(bx, 2), "branches": [], "paths": []})
+        rec.setdefault("flows", {})[edge["id"]] = {
+            "source": edge["source"], "target": edge["target"],
+            "points": [[round(px_, 2), round(py_, 2)] for px_, py_ in drawn], "label": None,
+        }
         rec["branches"].append({"flow": edge["id"], "node": item["node"], "side": item["side"], "y": item["trunk_y"], "bends": len(points) - 2})
         rec["paths"].append([(round(px_, 2), round(py_, 2)) for px_, py_ in points])
     for item in plan:  # the label code below works on the horizontal part that meets the trunk
@@ -263,6 +268,11 @@ def _draw_buses(scene: dict, buses: dict, bus_edges: list[dict]) -> tuple[str, l
                                          f"(run {run:.0f} px)" + (f" and touches {clashes}" if clashes else "")
                                          + ": widen the gap beside the bus or space the nodes"})
         placed_labels.append((edge["id"], box))
+        report[item["bus"]]["flows"][edge["id"]]["label"] = {
+            "lines": got["lines"],
+            "box": {"x": box[0], "y": box[1], "w": box[2] - box[0], "h": box[3] - box[1]},
+            "conflicts": clashes, "available_run_px": run,
+        }
         labels.append(sc._text_block(got["lines"], lx, box[1], t["edge_label_px"], style["edge_kinds"][item["kind"]]["stroke"],
                                      "normal", "start", f'{edge["id"]}:label'))
     for bus_id, rec in report.items():
@@ -282,10 +292,13 @@ def _draw_buses(scene: dict, buses: dict, bus_edges: list[dict]) -> tuple[str, l
 
 
 def _add_arguments(parser) -> None:
-    parser.add_argument("--page", required=True, help="the slide file to write (whole page; replaces the file)")
+    parser.add_argument("--page", help="the slide file to write (whole page; replaces the file)")
+    parser.add_argument("--evaluate-only", action="store_true", help="return measured layout/routes as JSON without SVG writes")
 
 
-def _work(request: dict, args) -> tuple[str, dict, list, list, dict]:
+def _evaluate(request: dict) -> dict:
+    """Shared writer/evaluator pipeline; only bus fragments are built in memory."""
+    request = copy.deepcopy(request)
     check_engine("placement", "primitive")
     check_engine("routing", "orthogonal")
     import os as _os
@@ -347,16 +360,6 @@ def _work(request: dict, args) -> tuple[str, dict, list, list, dict]:
             residuals.append(r)
     bus_svg, bus_residuals, bus_report = _draw_buses(scene, buses, bus_edges)
     residuals += bus_residuals
-    region = scene["region"]
-    bounds = " ".join(f"{float(region[k]):g}" for k in ("x", "y", "w", "h"))
-    group = sc.render_group(scene, "arch").replace('<g id="arch" ', f'<g id="arch" data-pptx-bounds="{bounds}" ', 1)
-    if bus_svg:
-        group = group[:group.rindex("</g>")] + bus_svg + "\n</g>"
-    page_path = Path(args.page)
-    page_path.parent.mkdir(parents=True, exist_ok=True)
-    page_path.write_text(page_compose.assemble(layout, group, defs=sc.marker_defs(scene, "arch")), encoding="utf-8", newline="\n")
-    if args.svg:
-        Path(args.svg).write_text(sc.render_svg(scene, title=scene.get("title")), encoding="utf-8")
     if any(r.get("kind") == "capacity" for r in residuals):
         status = "capacity_failure"
     elif residuals:
@@ -367,15 +370,124 @@ def _work(request: dict, args) -> tuple[str, dict, list, list, dict]:
                           "target": (e["route"].get("binding") or {}).get("target"),
                           "glue_expected": (e["route"].get("glue") or {}).get("expected")} for e in scene["edges"]}
     boxes = {item["id"]: item["box"] for group_name in ("zones", "nodes", "annotations") for item in scene[group_name]}
-    for rec in bus_report.values():
-        rec.pop("paths", None)
-    summary = {"page": {**page_compose.report(layout), "path": str(page_path)}, "boxes": boxes, "bindings": bindings,
-               "buses": bus_report, "spacing_scale": density}
+    # Expose the router's measured evidence without changing its decisions.
+    # Missing routes/labels remain explicit nulls; residuals retain failures.
+    routes = {e["id"]: {**copy.deepcopy(e.get("route") or {}),
+                         "source": e["source"], "target": e["target"],
+                         "points": copy.deepcopy((e.get("route") or {}).get("points")),
+                         "label": copy.deepcopy((e.get("route") or {}).get("label"))}
+              for e in scene["edges"]}
+    objects = {item["id"]: copy.deepcopy(item)
+               for group_name in ("zones", "nodes", "annotations") for item in scene[group_name]}
+    if scene.get("legend"):
+        objects[scene["legend"]["id"]] = copy.deepcopy(scene["legend"])
+        boxes[scene["legend"]["id"]] = copy.deepcopy(scene["legend"]["box"])
+    label_boxes = {}
+    for node in scene["nodes"]:
+        box, measure, typ = node["box"], node["measure"], scene["type"]
+        title_h = len(measure["title_lines"]) * sc.PITCH * typ["node_px"]
+        sub_h = (sc.SUB_GAP + len(measure["sub_lines"]) * sc.PITCH * typ["sub_px"]
+                 if measure["sub_lines"] else 0.0)
+        top = box["y"] + (box["h"] - title_h - sub_h) / 2
+        for role, lines, widths, y, height in (
+            ("title", measure["title_lines"], measure["title_widths"], top, title_h),
+            ("sub", measure["sub_lines"], measure["sub_widths"], top + title_h + sc.SUB_GAP,
+             max(0.0, sub_h - sc.SUB_GAP)),
+        ):
+            if lines:
+                width = max(widths)
+                label_boxes[f'{node["id"]}:{role}'] = {
+                    "owner": node["id"], "lines": lines, "extent_kind": "measured_line_band",
+                    "box": {"x": box["x"] + (box["w"] - width) / 2, "y": y, "w": width, "h": height},
+                }
+    for zone in scene["zones"]:
+        if (zone.get("caption") or {}).get("box"):
+            label_boxes[f'{zone["id"]}:caption'] = copy.deepcopy(zone["caption"])
+    for note in scene["annotations"]:
+        label_boxes[f'{note["id"]}:text'] = {"box": copy.deepcopy(note["box"]),
+                                              "lines": note["measure"]["lines"]}
+    if scene.get("legend"):
+        legend = scene["legend"]
+        box, measure = legend["box"], legend["measure"]
+        if measure["title"]:
+            label_boxes[f'{legend["id"]}:title'] = {
+                "lines": [measure["title"]],
+                "box": {"x": box["x"], "y": box["y"], "w": measure["title_w"], "h": measure["row_h"]},
+            }
+        for item in measure["items"]:
+            label_boxes[f'{item["id"]}:text'] = {
+                "lines": [item["text"]],
+                "box": {"x": box["x"] + item["dx"] + item["sample_w"] + item["gap"],
+                        "y": box["y"] + item["dy"], "w": item["text_w"], "h": measure["row_h"]},
+            }
+    for edge_id, route in routes.items():
+        label_boxes[f"{edge_id}:label"] = copy.deepcopy(route["label"])
+    for bus in bus_report.values():
+        for edge_id, flow in bus.get("flows", {}).items():
+            label_boxes[f"{edge_id}:label"] = copy.deepcopy(flow["label"])
+    summary = {"page": page_compose.report(layout), "boxes": boxes, "objects": objects, "bindings": bindings,
+               "label_boxes": label_boxes, "routes": routes, "buses": bus_report, "spacing_scale": density}
     if density < 0.999:
         residuals.append({"kind": "spacing_tightened", "scale": density,
                           "message": f"the layout did not fit at the requested spacing: gaps and paddings were scaled to {density:g} "
                                      f"of what you asked (nothing was dropped or shrunk). Free room elsewhere to get the spacing back"})
-    return status, summary, residuals, sc.content_ids(scene) + [e["id"] for e in bus_edges], {"scene_sha256": sc.scene_hash(scene)}
+    exclusions = ([{"kind": "raw_extra_svg", "field": "page.extra_svg",
+                    "message": "Raw SVG extensions are not measured or route-checked by the source evaluator."}]
+                  if layout.get("extra", "").strip() else [])
+    blocking = [r for r in residuals if r.get("kind") != "spacing_tightened"]
+    capacity_fit = not any(r.get("kind") == "capacity" for r in residuals)
+    coverage = {"helper_geometry_checked": True, "routing_checked": True,
+                "helper_edge_count": len(scene["edges"]), "bus_flow_count": len(bus_edges),
+                "complete": not exclusions, "exclusions": exclusions,
+                "scope": "Helper-owned geometry only; excludes native export parity, factual truth and visual judgment."}
+    # The evaluator owns this decision. Downstream delivery consumes it without
+    # imposing a second residual-list policy. Unknown residual kinds still block.
+    ready = capacity_fit and not blocking and coverage["complete"]
+    delivery_state = ("blocked" if blocking or not capacity_fit else
+                      "ready" if ready else "requires_external_geometry_audit")
+    return {"status": status, "result": summary, "residual_constraints": residuals,
+            "content_ids": sc.content_ids(scene) + [e["id"] for e in bus_edges],
+            "scene_sha256": sc.scene_hash(scene), "capacity_fit": capacity_fit,
+            "ready": ready, "delivery_state": delivery_state,
+            "blocking_constraints": blocking,
+            "warnings": [r for r in residuals if r.get("kind") == "spacing_tightened"],
+            "coverage": coverage,
+            "_scene": scene, "_layout": layout, "_bus_svg": bus_svg}
+
+
+def evaluate(request: dict) -> dict:
+    """Evaluate the exact whole-page candidate without rendering a complete SVG or writing files."""
+    result = {key: value for key, value in _evaluate(request).items() if not key.startswith("_")}
+    if not result["coverage"]["complete"] and result["status"] == "ok":
+        result["status"] = "partial"
+    return result
+
+
+def _work(request: dict, args) -> tuple[str, dict, list, list, dict]:
+    if getattr(args, "evaluate_only", False):
+        if args.page or args.svg:
+            raise HelperError("--evaluate-only forbids --page and --svg")
+        result = evaluate(request)
+        return (result["status"], result["result"], result["residual_constraints"], result["content_ids"],
+                {key: result[key] for key in ("scene_sha256", "capacity_fit", "ready", "delivery_state",
+                                            "blocking_constraints", "warnings", "coverage")})
+    if not args.page:
+        raise HelperError("--page is required unless --evaluate-only is selected")
+    result = _evaluate(request)
+    scene, layout, bus_svg = result["_scene"], result["_layout"], result["_bus_svg"]
+    region = scene["region"]
+    bounds = " ".join(f"{float(region[k]):g}" for k in ("x", "y", "w", "h"))
+    group = sc.render_group(scene, "arch").replace('<g id="arch" ', f'<g id="arch" data-pptx-bounds="{bounds}" ', 1)
+    if bus_svg:
+        group = group[:group.rindex("</g>")] + bus_svg + "\n</g>"
+    page_path = Path(args.page)
+    page_path.parent.mkdir(parents=True, exist_ok=True)
+    page_path.write_text(page_compose.assemble(layout, group, defs=sc.marker_defs(scene, "arch")), encoding="utf-8", newline="\n")
+    if args.svg:
+        Path(args.svg).write_text(sc.render_svg(scene, title=scene.get("title")), encoding="utf-8")
+    result["result"]["page"]["path"] = str(page_path)
+    return (result["status"], result["result"], result["residual_constraints"], result["content_ids"],
+            {"scene_sha256": result["scene_sha256"]})
 
 
 def main(argv: list[str] | None = None) -> int:

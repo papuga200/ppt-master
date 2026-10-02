@@ -124,13 +124,109 @@ def codex_argv(model: str, effort: str, system_file: Path, session_dir: Path, en
               f"mcp_servers.pptm.env_vars={_toml(sorted(k for k in env if k.upper() in sub.MCP_PASS_NAMES))}",
               "mcp_servers.pptm.startup_timeout_sec=120", "mcp_servers.pptm.tool_timeout_sec=86400",
               'mcp_servers.pptm.default_tools_approval_mode="approve"', 'sandbox_mode="read-only"']
-    base = sub.codex_base_argv(model, effort, system_file)
+    base = sub.codex_base_argv(model, effort, system_file, reasoning_summary=env.get("PPT_MASTER_REASONING_SUMMARY"))
     for item in server:
         base += ["-c", item]
     last = str(session_dir / "cli_last_message.txt")
     if resume:  # `resume` takes no -s/-C: the sandbox is set by -c above and the working root by the process cwd
         return [sub.codex_bin(), "exec", "resume", *base, "-o", last, resume, "-"]
     return [sub.codex_bin(), "exec", *base, "-C", str(ROOT), "-o", last, "-"]
+
+
+class CodexReasoningDiagnostics:
+    """Best-effort sidecar. Diagnostic faults never replace host processing."""
+
+    def __init__(self, session, setting, session_dir, started, model):
+        self.session, self.setting, self.model = session, setting, model
+        self.invocation_id = str(started)
+        self.receipt_path = session_dir / f"reasoning-{started}.json"
+        self.recorder = None
+        self.errors = []
+        self.outcome = "running"
+        self.author_exception = None
+        self.receipt_written = False
+        try:
+            from reasoning_diagnostics import Recorder
+            self.recorder = Recorder(setting, model=model,
+                                     path=session_dir / "reasoning_events.jsonl",
+                                     invocation_id=self.invocation_id)
+        except Exception as exc:
+            self._warning("initialize", exc, time.time())
+        self._persist("initialize_receipt")
+
+    def receipt(self):
+        base = {"schema": "provider-reasoning-diagnostics/v1",
+                "requested_setting": self.setting,
+                "requested": self.setting not in (None, "none"),
+                "model": self.model, "model_support_override": None,
+                "invocation_id": self.invocation_id,
+                "actual_availability": "pending",
+                "observed_summary_events": 0, "capture_complete": False}
+        if self.recorder is not None:
+            try:
+                base.update(self.recorder.receipt())
+            except Exception as exc:
+                # Receipt parser faults are diagnostic faults too. Avoid calling
+                # this method recursively through a warning.
+                self._warning("receipt_parse", exc, time.time())
+        complete = bool(base.get("capture_complete"))
+        base.update(outcome=self.outcome, diagnostic_errors=list(self.errors),
+                    author_exception=self.author_exception,
+                    receipt_path=str(self.receipt_path),
+                    capture_complete=complete and not self.errors and self.outcome == "completed")
+        if not base.get("observed_summary_events") and (self.errors or self.outcome in {"interrupted", "exception"}):
+            base["actual_availability"] = "unknown_incomplete"
+        return base
+
+    def _warning(self, stage, exc, received_at):
+        detail = {"stage": stage, "error_type": type(exc).__name__,
+                  "error": str(exc)[:500], "at": received_at}
+        self.errors.append(detail)
+        warning = {"event": "reasoning_diagnostics_error",
+                   "invocation_id": self.invocation_id,
+                   "receipt_path": str(self.receipt_path),
+                   "capture_complete": False,
+                   "actual_availability": "unknown_incomplete",
+                   "requested_setting": self.setting, **detail}
+        try:
+            self.session.log(warning)
+        except Exception:
+            # If both sidecar and transcript writes fail, make the absence
+            # explicit on stderr without allowing reporting to abort the run.
+            try:
+                print(json.dumps(warning, ensure_ascii=False), file=sys.stderr, flush=True)
+            except Exception:
+                pass
+
+    def _persist(self, stage):
+        self.receipt_written = False
+        try:
+            receipt = self.receipt()
+            self.receipt_path.write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            self.receipt_written = True
+        except Exception as exc:
+            self._warning(stage, exc, time.time())
+            # An earlier receipt can now be stale. Record that in a surviving
+            # host channel; do not pretend a failed write updated its contents.
+
+    def on_event(self, event):
+        received_at = time.time()
+        try:
+            if self.recorder is not None:
+                try:
+                    self.recorder.observe(event, received_at)
+                except Exception as exc:
+                    self._warning("observe", exc, received_at)
+        finally:
+            # Author processing is always attempted, including diagnostic
+            # parse/write failure. Host exceptions retain their old behavior.
+            self.session.on_codex(event, received_at=received_at)
+
+    def finish(self, outcome, error=None):
+        self.outcome = outcome
+        if error is not None:
+            self.author_exception = {"type": type(error).__name__, "message": str(error)[:500]}
+        self._persist("finalize_receipt")
 
 
 class Session:
@@ -244,8 +340,9 @@ class Session:
                       "permission_denials": len(event.get("permission_denials") or []), "session_id": event.get("session_id"), "at": now})
 
     # Codex -------------------------------------------------------------------------------------------------------------
-    def on_codex(self, event: dict) -> None:
-        kind, item, now = event.get("type"), event.get("item") or {}, time.time()
+    def on_codex(self, event: dict, received_at: float | None = None) -> None:
+        kind, item = event.get("type"), event.get("item") or {}
+        now = time.time() if received_at is None else received_at
         itype = item.get("type")
         if kind == "thread.started":
             self.thread_id = event.get("thread_id")
@@ -374,7 +471,7 @@ def _claude_run_cost(run: dict, state: dict, session_id: str | None, resumed: st
 
 
 def _add(total: dict, run: dict) -> dict:
-    for key in ("input_tokens", "cached", "output_tokens", "reasoning", "calls"):
+    for key in ("input_tokens", "cached", "cache_write", "output_tokens", "reasoning", "calls"):
         total[key] = total.get(key, 0) + (run.get(key) or 0)
     if run.get("cost_usd") is not None:
         total["cost_usd"] = round(total.get("cost_usd", 0.0) + run["cost_usd"], 6)
@@ -448,6 +545,7 @@ def main(argv: list[str] | None = None) -> int:
     env = sub.scrub_env()
     write_mcp_env(session_dir, env | {k: v for k, v in os.environ.items() if k in ("PPT_MASTER_SCRIPT_KEYS", "PPT_MASTER_ENV_FILE")})
     ceiling = None
+    diagnostics = None
     if backend == "claude":
         mcp_config = session_dir / "mcp_config.json"
         mcp_config.write_text(json.dumps({"mcpServers": {"pptm": {"type": "stdio", "command": sys.executable, "args": mcp_server_args(session_dir), "env": {}}}},
@@ -461,17 +559,33 @@ def main(argv: list[str] | None = None) -> int:
     else:
         argv = codex_argv(model, effort, system_file, session_dir, env, resume=resume)
         on_event = session.on_codex
+        summary_setting = env.get("PPT_MASTER_REASONING_SUMMARY")
+        if summary_setting is not None:
+            diagnostics = CodexReasoningDiagnostics(session, summary_setting, session_dir, started, model)
+            on_event = diagnostics.on_event
         ceiling = lambda: session.tool_calls >= args.max_turns * CODEX_TOOL_CALLS_PER_TURN  # noqa: E731
     state["pending_input"] = []
     state_path.write_text(json.dumps(state, indent=1), encoding="utf-8")
     (session_dir / "cli_argv.json").write_text(json.dumps(argv, indent=1), encoding="utf-8")
 
+    diagnostics_outcome = "exception"
+    diagnostics_error = None
     try:
-        code, stopped = run_cli(argv, message, env, session_dir / "cli_stream.jsonl", session_dir / "cli_stderr.log", on_event, ceiling)
-    except sub.SubscriptionError as exc:
-        session.log({"event": "refused", "error": str(exc), "at": time.time()})
-        print(f"REFUSED: {exc}", flush=True)
-        return 3
+        try:
+            code, stopped = run_cli(argv, message, env, session_dir / "cli_stream.jsonl", session_dir / "cli_stderr.log", on_event, ceiling)
+        except sub.SubscriptionError as exc:
+            diagnostics_error = exc
+            session.log({"event": "refused", "error": str(exc), "at": time.time()})
+            print(f"REFUSED: {exc}", flush=True)
+            return 3
+        except BaseException as exc:
+            diagnostics_error = exc
+            raise
+        else:
+            diagnostics_outcome = "interrupted" if stopped else "completed"
+    finally:
+        if diagnostics is not None:
+            diagnostics.finish(diagnostics_outcome, error=diagnostics_error)
 
     rollout = None
     if backend == "claude":
@@ -491,11 +605,7 @@ def main(argv: list[str] | None = None) -> int:
             state["cli_session_id"] = session.thread_id
         rollout, calls = session.codex_turns(started)
         if calls:
-            summed = {"input_tokens": sum(c["usage"].get("input_tokens") or 0 for c in calls),
-                      "cached_input_tokens": sum(c["usage"].get("cached_input_tokens") or 0 for c in calls),
-                      "output_tokens": sum(c["usage"].get("output_tokens") or 0 for c in calls),
-                      "reasoning_output_tokens": sum(c["usage"].get("reasoning_output_tokens") or 0 for c in calls)}
-            run = sub.codex_usage(summed, model, calls=len(calls))
+            run = sub.codex_request_usage(calls, model)
         else:
             run = sub.codex_usage(session.codex_usage, model, calls=1 if session.codex_usage else 0)
         last = session_dir / "cli_last_message.txt"

@@ -6,6 +6,7 @@
     reference_library.py label ID ... --form timeline [--topology "..."] [--devices "a; b"]
     reference_library.py label ID ... --verdict rejected --reason "..."
     reference_library.py show ID ... [--project P --page PAGE]
+    reference_library.py companion ID --kind source_svg|scene|fact_map|plan|annotations|recipe
     reference_library.py match --form architecture --need "oversight spanning every site, hub, data path" \
         [--density high] [--limit 1] [--exclude ID ...] [--project P] [--page PAGE]
     reference_library.py counterexamples --form timeline [--limit 1]
@@ -30,6 +31,12 @@ result, and with `--project` the delivery is recorded in quality-run.json. An en
 (`verdict: rejected`) never comes back as a positive match or on a sheet; `counterexamples` returns
 those deliberately, with the reason. A reference lends structure and devices, never facts, wording,
 counts, colours or branding.
+
+Curated entries may include a `companions` map of kind to library-relative UTF-8 file.
+`show` and `match` expose these paths; `companion` delivers the complete selected file through
+the tool result, including when the library is outside the host's file-reading workspace.
+`curate` accepts `companion_sources` with the same keys and copies them beside the images.
+See references/svg-creation-tools.md for the authoring discovery contract.
 """
 
 from __future__ import annotations
@@ -45,8 +52,11 @@ import tempfile
 import time
 from pathlib import Path
 
+from console_encoding import configure_utf8_stdio
+
 WEAK_SCORE = 3.0
 UNLABELLED = "unlabelled"
+COMPANION_KINDS = ("source_svg", "scene", "fact_map", "plan", "annotations", "recipe")
 _STOP = {"the", "a", "an", "of", "and", "or", "to", "in", "on", "for", "with", "that", "every", "each", "as", "is", "are", "by", "from"}
 
 
@@ -143,6 +153,19 @@ def observations(entry: dict) -> list[str]:
     return notes
 
 
+def companion_paths(entry: dict, library: Path) -> dict[str, Path]:
+    """Resolve existing companion files within the configured library."""
+    root = library.resolve()
+    found = {}
+    for kind, relative in (entry.get("companions") or {}).items():
+        if kind not in COMPANION_KINDS or not isinstance(relative, str):
+            continue
+        path = (root / relative).resolve()
+        if path.is_relative_to(root) and path.is_file():
+            found[kind] = path
+    return found
+
+
 def _print(entry: dict, library: Path, total: float | None, why: list[str], *, counterexample: bool = False) -> Path:
     labels = entry.get("labels") or {}
     image = (library / entry["image"]).resolve()
@@ -170,6 +193,9 @@ def _print(entry: dict, library: Path, total: float | None, why: list[str], *, c
         print(f"  typography: {labels['typography']} (our type floors still apply)")
     if entry.get("restrictions"):
         print(f"  provenance: {entry['restrictions']}")
+    for kind, path in companion_paths(entry, library).items():
+        print(f"  companion {kind}: run reference_library.py companion {entry['id']} --kind {kind}")
+        print(f"FILE: {path}")
     print("  Borrow the structure and devices that fit this page's content; never its facts, wording, counts or branding.")
     print(f"IMAGE: {image}")
     return image
@@ -358,6 +384,29 @@ def cmd_show(args: argparse.Namespace, library: Path, entries: list[dict]) -> in
     return 0
 
 
+def cmd_companion(args: argparse.Namespace, library: Path, entries: list[dict]) -> int:
+    """Deliver an available companion as complete text, without importing it into a deck."""
+    entry = next((item for item in entries if item.get("id") == args.ids[0]), None)
+    paths = companion_paths(entry or {}, library)
+    if args.kind not in paths:
+        print(f"no {args.kind} companion for {args.ids[0]}; available: {', '.join(paths) or 'none'}")
+        return 3
+    path = paths[args.kind]
+    try:
+        content = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        print(f"cannot read companion {path}: {exc}; use a UTF-8 text companion", file=sys.stderr)
+        return 2
+    print(f"COMPANION {args.ids[0]} {args.kind}")
+    print(f"FILE: {path}")
+    if _rejected(entry):
+        print(f"COUNTEREXAMPLE (do not imitate): {entry.get('reason') or 'rejected reference'}")
+    print(content, end="" if content.endswith("\n") else "\n")
+    _record(args.project, args.page, [{"id": args.ids[0], "kind": args.kind,
+                                    "companion": str(path), "counterexample": _rejected(entry)}])
+    return 0
+
+
 def cmd_match(args: argparse.Namespace, library: Path, entries: list[dict]) -> int:
     wanted_rejected = args.command == "counterexamples"
     need = _words(args.need)
@@ -403,16 +452,30 @@ def curate(library: Path, spec_path: Path) -> list[dict]:
         labels = {"communication_form": item["form"], "purpose": item.get("purpose"), "semantic_topology": item.get("composition"),
                   "density": item.get("density"), "typography": item.get("typography"), "use_cases": item.get("use_cases") or [],
                   "why": item.get("why"), "take": item.get("take") or [], "avoid": item.get("avoid") or []}
+        companions = {}
+        for kind, source in (item.get("companion_sources") or {}).items():
+            if kind not in COMPANION_KINDS:
+                raise ValueError(f"unknown companion kind {kind}; use {', '.join(COMPANION_KINDS)}")
+            source_path = Path(source)
+            if not source_path.is_absolute():
+                source_path = spec_path.resolve().parent / source_path
+            folder = library / "companions" / item["id"]
+            folder.mkdir(parents=True, exist_ok=True)
+            destination = folder / f"{kind}{source_path.suffix or '.txt'}"
+            shutil.copyfile(source_path, destination)
+            companions[kind] = destination.relative_to(library).as_posix()
         entries.append({"id": item["id"], "source": item.get("source") or str(source_image), "page": item.get("page"),
                         "image": f"images/{item['id']}.png", "sha256": hashlib.sha256(target.read_bytes()).hexdigest(),
-                        "labels": labels, "origin": "curated", "restrictions": item.get("restrictions"), "verdict": "good"})
+                        "labels": labels, "origin": "curated", "restrictions": item.get("restrictions"), "verdict": "good",
+                        **({"companions": companions} if companions else {})})
     save(library, entries)
     return entries
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    configure_utf8_stdio()
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("command", choices=("build", "curate", "sheet", "label", "show", "match", "counterexamples", "forms"))
+    parser.add_argument("command", choices=("build", "curate", "sheet", "label", "show", "companion", "match", "counterexamples", "forms"))
     parser.add_argument("ids", nargs="*", help="deck files for build; entry ids for label and show")
     parser.add_argument("--library", default=os.environ.get("PPT_MASTER_REFERENCE_LIBRARY"))
     parser.add_argument("--form")
@@ -428,7 +491,8 @@ def main() -> int:
     parser.add_argument("--exclude", nargs="*", default=[])
     parser.add_argument("--project")
     parser.add_argument("--page")
-    args = parser.parse_args()
+    parser.add_argument("--kind", choices=COMPANION_KINDS, help="companion: complete UTF-8 source, map or annotation")
+    args = parser.parse_args(argv)
     if not args.library:
         print("no reference library is configured (PPT_MASTER_REFERENCE_LIBRARY): continue without references and say so in the run summary")
         return 3
@@ -462,6 +526,10 @@ def main() -> int:
         if not args.ids:
             raise SystemExit("show needs at least one id")
         return cmd_show(args, library, entries)
+    if args.command == "companion":
+        if len(args.ids) != 1 or not args.kind:
+            parser.error("companion needs one id and --kind")
+        return cmd_companion(args, library, entries)
     args.limit = args.limit or 1
     return cmd_match(args, library, entries)
 

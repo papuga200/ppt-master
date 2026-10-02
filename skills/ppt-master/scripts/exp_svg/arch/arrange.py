@@ -353,6 +353,10 @@ def _fit_zone_layout(scene: dict, zone: dict, table: dict) -> tuple[tuple[float,
 
 def arrange_primitive(scene: dict) -> tuple[list[dict], dict]:
     table = sc.by_id(scene)
+    for peer in scene.get("peer_sets", []):
+        for item_id in peer["ids"]:
+            if table[item_id].get("measure"):
+                table[item_id]["measure"].pop("wrap_scale", None)
     for zone in scene["zones"]:
         if zone.get("frame") and not zone.get("caption_max_w"):  # a framed zone wraps its caption to the frame
             zone["caption_max_w"] = float(zone["frame"]["w"]) - 2 * float(zone.get("pad") or sc.ZONE_PAD)
@@ -366,24 +370,37 @@ def arrange_primitive(scene: dict) -> tuple[list[dict], dict]:
     residuals: list[dict] = []
     depths = _zone_depths(scene)
     content: dict[str, tuple[float, float]] = {}
-    # size pass, innermost zones first
-    for zone in sorted(scene["zones"], key=lambda z: -depths[z["id"]]):
-        left, top, right, bottom = sc.zone_insets(scene, zone)
-        if zone.get("layout"):
-            size, found = _fit_zone_layout(scene, zone, table)
-            content[zone["id"]] = size
-            residuals += found
-        if zone.get("frame"):
-            f = zone["frame"]
-            zone["box"] = {"x": float(f["x"]), "y": float(f["y"]), "w": float(f["w"]), "h": float(f["h"])}
-        elif zone.get("layout"):
-            w, h = content[zone["id"]]
-            at = zone.get("at") or {}
-            width = max(w + left + right, zone["caption"]["w"] + left + right)
-            zone["box"] = {"x": float(at.get("x", 0.0)), "y": float(at.get("y", 0.0)),
-                           "w": round(width, 2), "h": round(h + top + bottom, 2)}
-        else:
-            zone["box"] = None  # fitted around its members after placement
+    # Cross-zone peers may wrap more tightly in a later parent. Keep a monotone
+    # floor from each completed sizing pass and refresh earlier parent extents.
+    # Failed wrap trials do not become floors: only the finally selected wraps do.
+    peers = scene.get("peer_sets", [])
+    while True:
+        before = [max(table[i]["box"]["h"] for i in p["ids"]) for p in peers]
+        residuals = []
+        for zone in sorted(scene["zones"], key=lambda z: -depths[z["id"]]):
+            left, top, right, bottom = sc.zone_insets(scene, zone)
+            if zone.get("layout"):
+                size, found = _fit_zone_layout(scene, zone, table)
+                content[zone["id"]] = size
+                residuals += found
+            if zone.get("frame"):
+                f = zone["frame"]
+                zone["box"] = {"x": float(f["x"]), "y": float(f["y"]), "w": float(f["w"]), "h": float(f["h"])}
+            elif zone.get("layout"):
+                w, h = content[zone["id"]]
+                at = zone.get("at") or {}
+                width = max(w + left + right, zone["caption"]["w"] + left + right)
+                zone["box"] = {"x": float(at.get("x", 0.0)), "y": float(at.get("y", 0.0)),
+                               "w": round(width, 2), "h": round(h + top + bottom, 2)}
+            else:
+                zone["box"] = None  # fitted around its members after placement
+        after = [max(table[i]["box"]["h"] for i in p["ids"]) for p in peers]
+        for peer, height in zip(peers, after):
+            peer["_height_floor_px"] = height
+        if before == after:
+            break
+    for peer in peers:
+        peer.pop("_height_floor_px", None)
     placed: set[str] = set()
     for zone in scene["zones"]:
         if zone.get("frame") or zone.get("at"):
@@ -528,6 +545,8 @@ def arrange_elk(scene: dict) -> tuple[list[dict], dict]:
 def arrange(scene: dict, engine: str = "primitive") -> tuple[str, dict, list[dict]]:
     scene = sc.normalize(scene)
     if engine == "elk":
+        if scene.get("peer_sets"):
+            raise HelperError("peer_sets requires the primitive engine; ELK replaces measured node frames")
         residuals, info = arrange_elk(scene)
     elif engine == "primitive":
         residuals, info = arrange_primitive(scene)

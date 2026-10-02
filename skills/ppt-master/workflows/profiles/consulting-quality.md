@@ -24,18 +24,23 @@ description: Consulting-quality profile of Default Generate - the author renders
 
 Everything else - roster authority, lock re-reads, calibration, width estimation, native shapes, image acquisition, confirmations and their delegation - is Default's. Under explicit delegation the two Strategist stages are decided by the agent as [`generate-pptx.md`](../generate-pptx.md) Step 4 already allows; this profile adds no per-slide confirmation.
 
-Load [`consulting-review.md`](../../references/consulting-review.md) once, in the Step 6 reference batch, together with [`diagram-clarity.md`](../../references/diagram-clarity.md): its Diagram contract (directed connectors, loops and exits drawn to their targets, attached labels, keyed callouts, honest boundaries and axes) governs every diagram, and names the layout helpers (`scripts/diagram_layout.py` for flows and architectures, `scripts/timeline_layout.py` for every Gantt or timeline).
+Load [`consulting-review.md`](../../references/consulting-review.md), [`diagram-clarity.md`](../../references/diagram-clarity.md) and the compact [`svg-creation-tools.md`](../../references/svg-creation-tools.md) catalog in the Step 6 reference batch. Load [`diagram-planning.md`](../../references/diagram-planning.md) when planning or realizing a diagram or dense timeline; load the catalog's complete recipe and tool contracts at their stated triggers.
+
+**Author-owned scene compilation**: The author may choose a measured native scene as the page's creation source and compile it to the canonical SVG. The author retains the approved semantics, style, composition, operands, paint and z-order. [`svg-creation-tools.md`](../../references/svg-creation-tools.md) §2 governs source/compiler correspondence. The resulting SVG still contains every visible element and passes the ordinary final checker, native export and PowerPoint parity gates.
 
 ## 2. Reference slides the author actually sees
 
 ```bash
 python3 ${SKILL_DIR}/scripts/reference_library.py sheet --form <form> --project <project_path> --page <page>
 python3 ${SKILL_DIR}/scripts/reference_library.py show <id> [<id>] --project <project_path> --page <page>
+python3 ${SKILL_DIR}/scripts/reference_library.py companion <id> --kind annotations --project <project_path> --page <page>
 ```
 
 Look, then pick. `--form` is the page's job (`architecture`, `timeline`, `comparison`, `process`, `recommendation`, `matrix`, `capability_map`, `table`, `chart`, `cover`; `forms` lists what the library holds). `sheet` returns one contact sheet of every slide of that form with its id stamped; look at it, choose the one or two whose structure solves this page's communication problem, and `show` them full size. Each result ends in an `IMAGE:` line. **A reference on disk is not a reference seen**: the host attaches the image to the tool result; when it does not, open that path with the host's image tool before drawing. Delivery is recorded in `quality-run.json`. When a form's sheet is too large to judge, `match --form <form> --need "<relationships this page must show>"` shortlists by keyword instead.
 
 **Decks the user supplies for this run** are built into the library first: `build <deck.pdf|.pptx>` renders and indexes every page as `unlabelled`; `sheet --form unlabelled` shows them; `label <id> ... --form <form>` files each page's form (a few ids per call, by what the page does, not what it is about). Then use them like any other reference. The library lives outside the repository (`PPT_MASTER_REFERENCE_LIBRARY`) and no reference is ever packaged into a deck.
+
+For curated examples with source, map and annotation companions, use [`svg-creation-tools.md`](../../references/svg-creation-tools.md) §3. Inspect the example's actual diagram and transfer the declared technique within this deck's locked style.
 
 - Ask for one reference for a page whose form is difficult or unfamiliar; take a second from the same sheet only when a different treatment is needed. Covers, simple statements and pages with no useful precedent need none.
 - A reference lends structure and devices, never facts, wording, counts, colours or branding. When the match is weak or the content does not fit it, reject it and say so in the page note.

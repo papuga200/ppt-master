@@ -55,7 +55,7 @@ def tool_list(host) -> list[dict]:
 
 
 def _snapshot_svg(host, tool: str, arguments: dict) -> None:
-    """EXPERIMENT-ONLY (svg-helpers-experiment-20260930, never merged to production). When PPT_MASTER_SVG_SNAPSHOT_DIR is set, every
+    """Optional cold telemetry. When PPT_MASTER_SVG_SNAPSHOT_DIR is set, every
     successful write_file/edit_file of an .svg copies the file as written into that directory and appends one line to its
     snapshots.jsonl (time, tool, path, sha256, bytes, copy name), so the harness can find the first content-bearing write. The
     directory lies outside the checkout, so the session's own tools cannot read or change it. Never raises into the tool call."""
@@ -95,7 +95,7 @@ def call_tool(host, name: str, arguments: dict | None) -> tuple[dict, dict]:
         except Exception as exc:  # noqa: BLE001
             text, error = f"error: {type(exc).__name__}: {exc}", True
     if name in ("write_file", "edit_file") and not error:
-        _snapshot_svg(host, name, arguments or {})  # EXPERIMENT-ONLY (no-op unless PPT_MASTER_SVG_SNAPSHOT_DIR is set)
+        _snapshot_svg(host, name, arguments or {})  # Optional snapshot (no-op unless PPT_MASTER_SVG_SNAPSHOT_DIR is set)
     if name == "read_image" and not error:  # the host's wording is for its next-message delivery; here the image is in this result
         text = text.replace("is attached to the next message", "is shown below")
     content: list[dict] = [{"type": "text", "text": text}]

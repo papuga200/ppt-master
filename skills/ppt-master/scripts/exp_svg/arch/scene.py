@@ -10,6 +10,7 @@ marks they explain. This module owns node sizing from measured labels, the
 geometric checks every tool reports, and the SVG rendering in the fork's
 authoring contract (rect + text nodes, orthogonal <path> connectors whose ends
 sit on node edges so pptx_text_in_shapes.py can glue them after export).
+See scripts/docs/experimental-peer-sizing.md for declared semantic peer sizing.
 
 Usage:
     Library module for arrange.py, route_connections.py and move_group.py.
@@ -20,6 +21,7 @@ Dependencies:
 
 from __future__ import annotations
 
+import copy
 import sys
 from pathlib import Path
 from xml.sax.saxutils import escape
@@ -157,9 +159,10 @@ def segments_overlap_collinear(a1, a2, b1, b2, tol: float = 2.0) -> float:
 # ------------------------------------------------------------------------------------------------ normalisation
 
 def normalize(scene: dict) -> dict:
-    """Fill defaults, validate ids and references, enforce type floors (never lowers a size)."""
+    """Copy inputs, fill defaults, validate references and enforce type floors."""
     if not isinstance(scene, dict):
         raise HelperError("scene must be an object")
+    scene = copy.deepcopy(scene)
     scene.setdefault("schema", SCHEMA)
     scene["canvas"] = {"w": CANVAS_W, "h": CANVAS_H, **(scene.get("canvas") or {})}
     scene["region"] = scene.get("region") or {"x": 40.0, "y": 100.0, "w": 1200.0, "h": 590.0}
@@ -196,6 +199,7 @@ def normalize(scene: dict) -> dict:
         raise HelperError(f"duplicate ids: {duplicates}")
     zone_ids = {z["id"] for z in scene["zones"]}
     node_ids = {n["id"] for n in scene["nodes"]}
+    _validate_peer_sets(scene, node_ids)
     for zone in scene["zones"]:
         if zone.get("parent") and zone["parent"] not in zone_ids:
             raise HelperError(f"zone {zone['id']} names unknown parent {zone['parent']}")
@@ -215,6 +219,33 @@ def normalize(scene: dict) -> dict:
         if zone["kind"] not in scene["style"]["zone_kinds"]:
             raise HelperError(f"zone {zone['id']} kind {zone['kind']!r} has no style.zone_kinds entry")
     return scene
+
+
+def _validate_peer_sets(scene: dict, node_ids: set[str]) -> None:
+    peers = scene.get("peer_sets", [])
+    if not isinstance(peers, list):
+        raise HelperError("peer_sets must be an array of declared semantic peer sets")
+    assigned = set()
+    for index, peer in enumerate(peers):
+        where = f"peer_sets[{index}]"
+        if not isinstance(peer, dict):
+            raise HelperError(f"{where} must be an object with ids, equal_height, axis and align")
+        ids = peer.get("ids")
+        if not isinstance(ids, list) or len(ids) < 2 or any(not isinstance(i, str) or not i for i in ids):
+            raise HelperError(f"{where}.ids must contain at least two non-empty node ID strings")
+        if len(set(ids)) != len(ids):
+            raise HelperError(f"{where}.ids contains duplicate IDs; list each peer once")
+        unknown = sorted(set(ids) - node_ids)
+        if unknown:
+            raise HelperError(f"{where}.ids names unknown node IDs {unknown}; use node IDs, not zone IDs")
+        repeated = sorted(set(ids) & assigned)
+        if repeated:
+            raise HelperError(f"{where}.ids repeats IDs from another peer set {repeated}; use one set per node")
+        for key, expected in (("equal_height", True), ("axis", "horizontal"), ("align", "centerline")):
+            if peer.get(key) != expected or key == "equal_height" and peer.get(key) is not True:
+                raise HelperError(f"{where}.{key} must be {expected!r}")
+        assigned.update(ids)
+        peer.pop("_height_floor_px", None)
 
 
 def zone_chain(scene: dict, zone_id: str | None) -> list[str]:
@@ -274,12 +305,27 @@ def measure_text(scene: dict, text: str, size: float, role: str, weight: str = "
                                          "max_width": max_width}, scene["font"])
 
 
-def size_node(scene: dict, node: dict, wrap_scale: float = 1.0) -> None:
-    """Measured box for a node: title (bold, body size) and optional sublabel; never smaller than its text."""
+def _size_node(scene: dict, node: dict, wrap_scale: float = 1.0) -> None:
+    """Measure a node without shrinking text: max_w is a legacy OUTER wrap budget.
+
+    wrap_width_px is an explicit INNER text wrap width. Do not specify both on
+    a node. The scene's node_max_w remains the legacy default. Neither width
+    is a hard frame cap: oversized words and min_w can require a wider frame.
+    """
     t = scene["type"]
-    max_w = float(node.get("max_w") or scene.get("node_max_w") or 200.0) * wrap_scale
     pad_x, pad_y = (float(v) for v in (scene.get("node_pad") or (PAD_X, PAD_Y)))  # compose_page.py density ladder
-    inner = max(max_w - 2 * pad_x, 40.0)
+    scale = measure_labels.positive_number(wrap_scale, f"node {node['id']}/wrap_scale")
+    if "wrap_width_px" in node and "max_w" in node:
+        raise HelperError(f"node {node['id']}/wrap_width_px: do not combine inner width with max_w outer budget")
+    if "wrap_width_px" in node:
+        inner = measure_labels.positive_number(node["wrap_width_px"], f"node {node['id']}/wrap_width_px") * scale
+        max_w = inner + 2 * pad_x
+        width_contract = "explicit_inner"
+    else:
+        budget = node.get("max_w", scene.get("node_max_w", 200.0))
+        max_w = measure_labels.positive_number(budget, f"node {node['id']}/max_w") * scale
+        inner = max(max_w - 2 * pad_x, 40.0)
+        width_contract = "legacy_outer"
     title = measure_text(scene, node.get("label") or node["id"], t["node_px"], "body", "bold", inner)
     sub = measure_text(scene, node["sublabel"], t["sub_px"], "label", "normal", inner) if node.get("sublabel") else None
     text_w = max(title["width_px"], sub["width_px"] if sub else 0.0)
@@ -296,6 +342,51 @@ def size_node(scene: dict, node: dict, wrap_scale: float = 1.0) -> None:
     height = max(need_h, float(node.get("min_h") or 0))
     box = node.get("box") or {}
     node["box"] = {"x": box.get("x", 0.0), "y": box.get("y", 0.0), "w": round(width, 2), "h": round(height, 2)}
+    node["measure"].update({
+        "width_contract": width_contract, "outer_wrap_budget_px": round(max_w, 2),
+        "text_wrap_width_px": round(inner, 2), "padding_x_px": pad_x, "padding_y_px": pad_y,
+        "frame_width_px": node["box"]["w"], "frame_height_px": node["box"]["h"],
+        "inner_width_px": round(width - 2 * pad_x, 2), "inner_height_px": round(height - 2 * pad_y, 2),
+        "measured_text_width_px": text_w, "layout_height_px": round(title_h + sub_h, 2),
+        "title_text_band_height_px": title["text_band_height_px"],
+        "sub_text_band_height_px": sub["text_band_height_px"] if sub else 0.0,
+        "title_line_pitch_px": title["line_pitch_px"], "sub_line_pitch_px": sub["line_pitch_px"] if sub else None,
+        "font": title["font"], "verification": title["verification"],
+    })
+
+
+def size_node(scene: dict, node: dict, wrap_scale: float = 1.0) -> None:
+    """Measure current text; declared peers share height without sharing width or position.
+
+    Original wrap budgets provide a common floor. Each member's selected wrap
+    is remeasured, so tighter wrapping can raise that floor across zone parents.
+    arrange.py stabilizes parent extents before placing the result.
+    """
+    peer = next((p for p in scene.get("peer_sets", []) if node["id"] in p["ids"]), None)
+    if peer is None:
+        _size_node(scene, node, wrap_scale)
+        return
+    table = {n["id"]: n for n in scene["nodes"]}
+    members = [table[i] for i in peer["ids"]]
+    measured = []
+    floor = float(peer.get("_height_floor_px", 0.0))
+    for member in members:
+        baseline = copy.deepcopy(member)
+        _size_node(scene, baseline, 1.0)
+        floor = max(floor, baseline["box"]["h"])
+        scale = wrap_scale if member["id"] == node["id"] else member.get("measure", {}).get("wrap_scale", 1.0)
+        current = copy.deepcopy(member)
+        _size_node(scene, current, scale)
+        current["measure"]["wrap_scale"] = scale
+        floor = max(floor, current["box"]["h"])
+        measured.append((member, current))
+    floor = round(floor, 2)
+    for member, current in measured:
+        member["box"] = {**current["box"], "h": floor}
+        member["measure"] = current["measure"]
+        member["measure"].update({"frame_height_px": floor,
+                                  "inner_height_px": round(floor - 2 * current["measure"]["padding_y_px"], 2),
+                                  "peer_height_px": floor})
 
 
 def zone_caption(scene: dict, zone: dict) -> dict:
@@ -408,6 +499,18 @@ def node_checks(scene: dict) -> list[dict]:
     canvas = (0.0, 0.0, scene["canvas"]["w"], scene["canvas"]["h"])
     zones = {z["id"]: z for z in scene["zones"]}
     nodes = scene["nodes"]
+    node_table = {node["id"]: node for node in nodes}
+    for peer in scene.get("peer_sets", []):
+        boxes = [node_table[identifier]["box"] for identifier in peer["ids"]]
+        heights = [box["h"] for box in boxes]
+        centres = [box["y"] + box["h"] / 2 for box in boxes]
+        if max(heights) - min(heights) > 0.1:
+            found.append({"kind": "peer_height_mismatch", "ids": peer["ids"],
+                          "heights_px": heights, "message": "Declared semantic peers have unequal measured heights"})
+        if max(centres) - min(centres) > 0.5:
+            found.append({"kind": "peer_centerline_mismatch", "ids": peer["ids"],
+                          "centres_y_px": centres,
+                          "message": "Declared horizontal semantic peers do not share a measured centerline"})
     for node in nodes:
         r = rect(node["box"])
         if node["box"]["w"] + 0.01 < node["measure"]["need_w"] or node["box"]["h"] + 0.01 < node["measure"]["need_h"]:
@@ -569,7 +672,7 @@ def render_group(scene: dict, prefix: str = "arch") -> str:
         caption = zone.get("caption") or {}
         if caption.get("lines"):
             cb = caption["box"]
-            out.append(_text_block(caption["lines"], cb["x"], cb["y"], t["zone_label_px"], zs["stroke"], "bold", "start",
+            out.append(_text_block(caption["lines"], cb["x"], cb["y"], t["zone_label_px"], zs.get("text") or zs["stroke"], "bold", "start",
                                    f'{zone["id"]}:caption'))
         out.append("</g>")
     edges_svg, labels_svg = [], []
@@ -599,11 +702,15 @@ def render_group(scene: dict, prefix: str = "arch") -> str:
         title_h = len(m["title_lines"]) * PITCH * t["node_px"]
         sub_h = (SUB_GAP + len(m["sub_lines"]) * PITCH * t["sub_px"]) if m["sub_lines"] else 0.0
         top = b["y"] + (b["h"] - title_h - sub_h) / 2
-        out.append(f'<g id="{prefix}-node-{node["id"]}" data-arch-id="{node["id"]}" data-arch-role="node">'
-                   f'<rect x="{_num(b["x"])}" y="{_num(b["y"])}" width="{_num(b["w"])}" height="{_num(b["h"])}" '
+        owned = bool(style.get("native_text_ownership"))
+        ownership = (f' data-pptx-semantic-object="shape" data-pptx-frame="{_num(b["x"])} {_num(b["y"])} {_num(b["w"])} {_num(b["h"])}"'
+                     f' data-name="{prefix}-node-{escape(node["id"])}"') if owned else ""
+        carrier = ' data-pptx-part="geometry"' if owned else ""
+        out.append(f'<g id="{prefix}-node-{node["id"]}" data-arch-id="{node["id"]}" data-arch-role="node"{ownership}>'
+                   f'<rect{carrier} x="{_num(b["x"])}" y="{_num(b["y"])}" width="{_num(b["w"])}" height="{_num(b["h"])}" '
                    f'rx="{style["node_radius"]}" fill="{ns["fill"]}" stroke="{ns["stroke"]}" stroke-width="{ns["width"]}"{dash}/>')
         ink = ns.get("text") or style["text"]
-        if m["sub_lines"] and style.get("node_text", "separate") == "separate":
+        if not owned and m["sub_lines"] and style.get("node_text", "separate") == "separate":
             out.append(_text_block(m["title_lines"], cx, top, t["node_px"], ink, "bold", "middle", f'{node["id"]}:title'))
             out.append(_text_block(m["sub_lines"], cx, top + title_h + SUB_GAP, t["sub_px"], style["muted"], "normal",
                                    "middle", f'{node["id"]}:sub'))

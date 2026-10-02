@@ -31,6 +31,7 @@ Dependencies:
 
 from __future__ import annotations
 
+import math
 import sys
 from pathlib import Path
 
@@ -50,12 +51,75 @@ TOOL = "exp_svg.arch.measure_labels"
 LINE_PITCH = 1.3  # consulting-typesetting.md leading floor is 1.28 x for body text
 MEASURE_PX = 256
 BOLD_WEIGHTS = ("bold", "600", "700", "800", "900")
+ROLES = ("body", "label", "furniture", "timeline-chart")
+LABEL_FIELDS = {"id", "text", "size_px", "weight", "role", "max_width", "max_w",
+                "line_pitch", "line_pitch_px"}
+REQUEST_FIELDS = {"font", "verify", "labels", "browser_tolerance_px"}
 _FONT_CACHE: dict[tuple[str, int], object] = {}
 _BROWSER_CACHE: dict[tuple[str, str, float, str], float] = {}
 
 
 def role_floor(role: str) -> float:
     return FLOOR_BODY_PX if role == "body" else FLOOR_LABEL_PX
+
+
+def positive_number(value: object, pointer: str) -> float:
+    """Require a finite positive JSON number, with an actionable input location."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise HelperError(f"{pointer}: use a finite positive number in the documented units")
+    number = float(value)
+    if not math.isfinite(number) or number <= 0:
+        raise HelperError(f"{pointer}: use a finite positive number in the documented units")
+    return number
+
+
+def validate_guided_request(request: dict) -> None:
+    """Reject unknown fields at the public boundary; internal scene calls remain permissive."""
+    def known(value, fields, pointer):
+        if not isinstance(value, dict):
+            raise HelperError(f"{pointer or '/'}: use a JSON object")
+        for key in value.keys() - fields:
+            raise HelperError(f"{pointer}/{key}: unsupported field; supported fields: {', '.join(sorted(fields))}")
+
+    known(request, REQUEST_FIELDS, "")
+    if "font" in request:
+        known(request["font"], {"family", "files", "face"}, "/font")
+        if "files" in request["font"]:
+            known(request["font"]["files"], {"normal", "bold"}, "/font/files")
+    labels = request.get("labels")
+    if not isinstance(labels, list) or not labels:
+        raise HelperError("/labels: use a non-empty list of label objects")
+    for index, label in enumerate(labels):
+        pointer = f"/labels/{index}"
+        known(label, LABEL_FIELDS, pointer)
+        for key in ("max_width", "max_w", "line_pitch", "line_pitch_px"):
+            if key in label:
+                positive_number(label[key], f"{pointer}/{key}")
+
+
+def label_geometry(label: dict, size: float) -> tuple[float | None, float, list[dict]]:
+    """Normalize inner wrap width and baseline pitch without mutating the request.
+
+    max_width is inner text width in px; max_w is its deprecated alias.
+    line_pitch is a multiplier; line_pitch_px is baseline spacing in px.
+    """
+    pointer = f"label {label.get('id')!r}"
+    widths = {key: positive_number(label[key], f"{pointer}/{key}")
+              for key in ("max_width", "max_w") if label.get(key) is not None}
+    if len(widths) == 2 and widths["max_width"] != widths["max_w"]:
+        raise HelperError(f"{pointer}/max_w: conflicts with max_width; supply one inner wrap width in px")
+    warnings = []
+    if "max_w" in widths:
+        warnings.append({"kind": "deprecated_alias", "field": "max_w", "canonical_field": "max_width",
+                         "message": "max_w normalized to max_width (inner text wrap width in px)"})
+    multiplier = positive_number(label["line_pitch"], f"{pointer}/line_pitch") if "line_pitch" in label else None
+    pixels = positive_number(label["line_pitch_px"], f"{pointer}/line_pitch_px") if "line_pitch_px" in label else None
+    if multiplier is not None and pixels is not None and not math.isclose(multiplier * size, pixels):
+        raise HelperError(f"{pointer}/line_pitch_px: conflicts with line_pitch multiplier; supply one pitch")
+    if multiplier is not None and multiplier > 4:
+        raise HelperError(f"{pointer}/line_pitch: multiplier is implausible; use line_pitch_px for pixel spacing")
+    pitch = pixels if pixels is not None else (multiplier if multiplier is not None else LINE_PITCH) * size
+    return widths.get("max_width", widths.get("max_w")), pitch, warnings
 
 
 def is_bold(weight: str | int | None) -> bool:
@@ -146,16 +210,14 @@ def measure_label(label: dict, font: dict) -> dict:
     text = label.get("text")
     if text is None or str(text) == "":
         raise HelperError(f"label {label.get('id')!r} has no text")
-    size = float(label.get("size_px") or 0)
-    if size <= 0:
-        raise HelperError(f"label {label.get('id')!r} needs size_px")
-    role = str(label.get("role") or "label")
+    size = positive_number(label.get("size_px"), f"label {label.get('id')!r}/size_px")
+    role = label.get("role", "label")
+    if role not in ROLES:
+        raise HelperError(f"label {label.get('id')!r}/role: use one of {', '.join(ROLES)}")
     weight = str(label.get("weight") or "normal")
     resolved = resolve_font(font, weight)
-    max_width = label.get("max_width")
-    max_width = float(max_width) if max_width else None
+    max_width, pitch, warnings = label_geometry(label, size)
     lines, widths, oversized = wrap(str(text), size, max_width, resolved)
-    pitch = float(label.get("line_pitch") or LINE_PITCH) * size
     floor = role_floor(role)
     estimate = max((checker_estimate(line, size, resolved["family"], weight) or 0.0) for line in lines)
     return {
@@ -165,6 +227,10 @@ def measure_label(label: dict, font: dict) -> dict:
         "line_widths_px": [round(w, 2) for w in widths],
         "width_px": round(max(widths) if widths else 0.0, 2),
         "height_px": round(pitch * (len(lines) - 1) + 1.2 * size, 2),
+        "text_band_height_px": round(pitch * (len(lines) - 1) + 1.2 * size, 2),
+        "layout_height_px": round(pitch * len(lines), 2),
+        "max_width": max_width,
+        "warnings": warnings,
         "line_pitch_px": round(pitch, 2),
         "size_px": size,
         "weight": weight,
@@ -172,6 +238,7 @@ def measure_label(label: dict, font: dict) -> dict:
         "floor": {"min_px": floor, "ok": size + FLOOR_TOLERANCE >= floor},
         "font": resolved,
         "measurement": "approximate" if resolved["file"] else "estimate",
+        "verification": {"status": "not_requested", "backend": None},
         "checker_estimate_px": round(estimate, 2) if estimate else None,
         "oversized_words": oversized,
     }
@@ -252,6 +319,10 @@ def verify_in_browser(measured: list[dict], tolerance_px: float = 1.0) -> list[d
         label["browser_delta_px"] = max(deltas, key=abs) if deltas else None
         present = label.get("browser_font_present", True)
         label["browser_font_present"] = present
+        label["verification"] = {"status": "failed" if not present or
+                                 (label["browser_delta_px"] is not None and
+                                  abs(label["browser_delta_px"]) > tolerance_px) else "verified",
+                                 "backend": "chromium_getComputedTextLength", "tolerance_px": tolerance_px}
         if not present:
             residuals.append({"kind": "font_missing_in_browser", "id": label["id"],
                               "message": f"Chromium does not have {label['font']['family']}: widths unverified"})
@@ -264,6 +335,9 @@ def verify_in_browser(measured: list[dict], tolerance_px: float = 1.0) -> list[d
 
 
 def measure_request(request: dict) -> tuple[list[dict], list[dict]]:
+    verify = request.get("verify", "none")
+    if verify not in ("none", "browser"):
+        raise HelperError("/verify: use 'none' or 'browser'; unsupported values cannot disable verification")
     font = request.get("font") or {"family": "Segoe UI"}
     labels = request.get("labels")
     if not isinstance(labels, list) or not labels:
@@ -284,8 +358,10 @@ def measure_request(request: dict) -> tuple[list[dict], list[dict]]:
         if label["font"]["file"] is None:
             residuals.append({"kind": "no_font_file", "id": label["id"],
                               "message": f"{label['font']['family']} has no font file here: width is the DrawingML estimate"})
-    if str(request.get("verify") or "none") == "browser":
-        residuals += verify_in_browser(measured, float(request.get("browser_tolerance_px") or 1.0))
+    tolerance = positive_number(request["browser_tolerance_px"], "/browser_tolerance_px") \
+        if "browser_tolerance_px" in request else 1.0
+    if verify == "browser":
+        residuals += verify_in_browser(measured, tolerance)
     return measured, residuals
 
 

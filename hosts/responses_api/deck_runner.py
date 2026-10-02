@@ -64,6 +64,9 @@ HOST = Path(__file__).resolve().parent / "host.py"
 CLI_HOST = Path(__file__).resolve().parent / "cli_host.py"  # the same contract on a subscription CLI (api_base cli:claude | cli:codex)
 SKILL = ROOT / "skills" / "ppt-master"
 SCRIPTS = SKILL / "scripts"
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
+from authoring_contract import prepare_contract  # noqa: E402
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
         _stream.reconfigure(encoding="utf-8", errors="replace")
@@ -103,17 +106,17 @@ CONTRACT_DOCS = [
     "references/executor-base.md", "references/shared-standards-core.md", "references/semantic-svg.md",
     "references/native-shape-authoring.md", "references/preset-shape-vocabulary.md", "references/topology-assembly.md",
     "references/executor-table.md", "references/native-data-interface.md", "references/consulting-typesetting.md", "references/consulting-review.md",
-    "references/diagram-clarity.md", "references/svg-image-embedding.md",
+    "references/diagram-clarity.md", "references/svg-image-embedding.md", "references/svg-creation-tools.md",
 ]
 
 PAGE_AUTHOR_BRIEF = """# Page author
 
-You are the author of ONE slide of a consulting deck, drawn as SVG under the PPT Master contract (the documents below) and exported later as native PowerPoint. A planner has already decided what the page says and how it is composed: that is your SLIDE RECORD, in the first user message. Other pages of the same deck are being authored at this moment by other authors you never see, and the deck must still read as one hand. That rests on five things you follow exactly: the design system and the execution lock below, the Narrative's continuity rules, the deck digest (what your neighbours say), and the CHROME SOURCE named in your job.
+You are the author of ONE slide of a consulting deck, drawn as SVG under the PPT Master contract (the documents below) and exported later as native PowerPoint. A planner has already decided what the page says: that is your SLIDE RECORD, in the first user message. You realize its composition within the recorded style and semantic requirements. Other pages of the same deck are being authored at this moment by other authors you never see, and the deck must still read as one hand. That rests on five things you follow exactly: the design system and the execution lock below, the Narrative's continuity rules, the deck digest (what your neighbours say), and the CHROME SOURCE named in your job.
 
 ## What you may touch
-- Write and edit only your own page file, `svg_output/<stem>.svg`, under the project named in your job. Never edit the design spec, the lock, another page, the templates or the sources.
+- Write and edit your own page file, `svg_output/<stem>.svg`, and your own planning, request and receipt files under `analysis/authoring/<stem>/`. Helper-managed sidecars belong to your page. Never edit the design spec, the lock, another page, the templates, the sources or the runner's contract.json.
 - Never run the checker, finalize, export, the contact sheet or the preview server: the deck runner does those once for the whole deck. The preview server is already running.
-- I am away: every decision is delegated to you. Never stop to ask. Do not read the skill's other documents unless a rule you need is missing from this prompt; never read script source.
+- I am away: every decision is delegated to you. Never stop to ask. Read the conditional creation recipes and complete tool contracts identified by svg-creation-tools.md when their observable trigger appears; the core documents remain in force. Other skill documents are available when a rule you need is missing; never read script source.
 
 ## The record
 `Title` and `Core message` are verbatim. `Content` contains the visible claims, evidence and explanations: preserve their meaning and all material qualifiers, but edit wording to fit and read naturally. `Audience question` and `Audience move` define what the reader must learn; `Visual task` defines what the visual must make readable. `Relationships`, `Hierarchy`, `Visual approach`, `Composition` and `Avoid` guide you. `Visual approach` and `Composition` preserve the intended carrier, focal point, grouping and reading path; they are starting ideas rather than fixed geometry. You own exact shape placement, spacing, coordinates, line weights and text fit. A page may be spare when one example, comparison or proof is enough. Use the lock's type hierarchy and consulting-typesetting.md; if material will not fit legibly, simplify the depiction without dropping the page's answer or evidence. `Editor notes` are for a human and are never drawn. A `[To be provided: ...]` in your Content is drawn exactly as written, in muted italic inside a dashed hairline slot of the final element's size: it marks what the firm must supply - never replace it with an invented name, client, photo or number. Every number is a scenario value from the record; never invent one.
@@ -128,8 +131,8 @@ The deck is edited by people afterwards, so its objects must behave like theirs.
 - A table is a native table: when your record has a `Native-ready: <key>=yes` line, that grid is drawn as `<g id="<key>" data-pptx-replace-with="table">` with its JSON `<metadata>` (schema `ppt-master.semantic-table.v2`, native-data-interface.md §2) AND the visible fallback in the same design; style it per cell (header band, row fills, first-column weight, sparse borders, padding) so the PowerPoint table looks like the fallback. After every edit inside that group run `run_script stamp_native_fallbacks.py <project>/svg_output/<stem>.svg --write`.
 - One `<text>` per paragraph: the lines of one paragraph are positioned `<tspan>` lines inside that one `<text>`, never sibling `<text>` elements. A heading and the paragraph under it are two `<text>` elements with the same left edge.
 - A label on a bar, chip, chevron or node is centred in its shape (`text-anchor="middle"` at the shape's centre, vertically centred), unless the design needs it left-aligned with padding.
-- A timeline or Gantt is laid out by timeline_layout.py, never by hand. Write its spec (region, horizon, lanes with EVERY bar, decisions as `gates` - `through: <lane id>` stops a gate's line at the lane it gates -, deliverables and appearances as `milestones`, a dated limit such as "Aug 1, 2023 - latest first draft" as a `deadlines` marker, which may lie past the horizon's end, dependencies, colours from the lock), run `run_script timeline_layout.py <spec.json> --into <project>/svg_output/<stem>.svg` - it writes the chart into the page as one group `<g id="timeline" data-layout="timeline_layout">` and keeps the spec beside the page as `svg_output/<stem>.timeline.json` - then render. Every CHECK it prints is a collision still on the chart: fix it in the spec. To change ANYTHING on the chart, edit that spec and run it again with --into; never edit coordinates inside the group - the lint compares the group with the hash the helper wrote and flags a hand edit (TIMELINE_HAND_EDITED), and flags a Gantt drawn without the helper (TIMELINE_NOT_FROM_HELPER). When it reports that the plan does not fit, shorten labels or merge bars (detail goes to Editor notes), never shrink type. Every bar carries its own label - inside the bar when it fits, otherwise just beside it on the same row - never in a key or a lane heading (consulting-typesetting.md §6); decisions, deliverables and deadlines are named at their week on the chart, never in a strip, box or list beside or below it.
-- An arrow between two boxes is a straight `<line>` from the edge of one box to the edge of the other, or a `<path>` of horizontal and vertical segments (`M x y H .. V .. H ..`, at most two bends), ending ON the edges with `marker-end` (it becomes a connector glued to both boxes in PowerPoint). Draw every diagram to the Diagram contract in diagram-clarity.md: one arrowhead at the target, loops that end with a head on the node they return to, exits drawn as labelled arrows to end states, every label attached, numbered callouts keyed both ways. For a flow or architecture with more than four nodes or any loop, lay it out with `run_script diagram_layout.py <spec.json> --svg <out.svg>` (ELK: orthogonal routes, labels measured and placed off the lines), then style.
+- A timeline or Gantt uses one source request and a hashed helper group. Choose the dated dense creator or the existing timeline_layout helper through svg-creation-tools.md and load creation-recipes/timeline.md. Preserve every required bar, event, decision, deadline, dependency and exact date; inspect capacity before detailed creation. Rebuild the group from that source after every change. consulting-typesetting.md §6 governs the bar labels and time-attached marks.
+- An arrow between two boxes is a straight `<line>` from the edge of one box to the edge of the other, or a `<path>` of horizontal and vertical segments (`M x y H .. V .. H ..`, at most two bends), ending ON the edges with `marker-end` (it becomes a connector glued to both boxes in PowerPoint). Draw every diagram to the Diagram contract in diagram-clarity.md. For a flow or architecture load diagram-planning.md, then choose measured native scene composition, ELK fragment layout, or direct native SVG through svg-creation-tools.md. Preserve the record's semantic abstraction, level of detail, functional parent meanings and comparable business units; choose the actual carrier/layout family and physical geometry within them. Keep an ASCII plan and fact/relationship map beside the chosen machine scene; they describe the actual emitted diagram. Measure fit and routing space before detailed creation. A helper-built page is regenerated from its scene; do not create divergence by patching its SVG alone.
 - Nothing is painted between a shape and the text that belongs to it: accent bars, icons and rules go where they do not overlap the text.
 
 ## Chrome
@@ -243,6 +246,10 @@ PLANNER_BRIEF = """PLANNING JOB
 Project: {project}. Read its solution.md and all source files first. The solution owns verified facts and limits. Plan a deck that achieves the request's audience outcome, with the requested page count or structure when supplied. Use {exemplar} only for the document's section structure and field syntax; never copy its story, density, layouts, content, or drawing style. Write design_spec.md and spec_lock.md in {project}; use {exemplar_lock} for lock syntax.
 
 Read `analysis/source_visuals/catalog.md` when present. It inventories visual assets from supplied documents and decks; a preview of an old slide is a sourced screenshot, while an embedded picture is a reusable image. Select an asset only when it answers a page's question or supplies real visual evidence. Inspect the chosen image and its source context before planning placement. Put its exact `images/...` path, original source and slide/page when known, visual job, and crop/label treatment on that slide's `Images` line. In §VIII use its basename as `Filename`, `Acquire Via: user`, and `Status: Existing`; project it into the lock's images section. Do not ask an author to draw a substitute for a real source image; if required visual proof is absent, say so in the plan and choose an honest presentation of the available evidence.
+
+Use diagram-planning.md for diagram pages: purpose and semantic abstraction precede parent groups. Preserve matched business stages in current/future comparisons, required individual links, and source-grounded local detail. In Hierarchy and Relationships record the semantic abstraction, level of detail, functional parent meanings, comparable business units and required link meanings. The page author chooses actual carrier/layout family, allocation and geometry within those decisions. When a matched reference lists source, fact-map or annotation companions, retrieve them with reference_library.py companion before deciding what transfers. A dense later prototype is not automatically a positive example.
+
+When `analysis/creation-resources/catalog.md` exists, read its available original craft resources and source provenance. Read complete matching family guidance when it informs the page's communication choice; do not substitute a short summary for the original resource. Its patterns are references within this deck's approved facts, ownership and style, rather than additional requirements or a selected authoring tool.
 
 Plan in this order:
 1. READER CONTRACT. In section IX Narrative, name each audience, what it already knows, its questions, the desired understanding or decision, the reading context, and what the file must explain without a presenter. For multiple purposes, show how the arc serves each without making every slide do every job.
@@ -696,6 +703,13 @@ def build_system(project: Path, pages: list[dict], calibration: str, role: str =
         parts.append(f"\n## Source visual inventory\n\nThe supplied visual candidates and their provenance are listed at "
                      f"`{catalog.relative_to(ROOT).as_posix()}`. Use only the assets selected in your slide record; "
                      "inspect their actual pixels before placing them.\n")
+    resources = project / "analysis" / "creation-resources" / "catalog.md"
+    if resources.is_file():
+        parts.append(f"\n## Original creation resources\n\nRead `{resources.relative_to(ROOT).as_posix()}` "
+                     "for the full project-local craft packs and provenance. Load the complete matching family material "
+                     "when useful; the catalog is a discovery surface, not a replacement for those resources. "
+                     "The approved record, lock, template and native export contract remain authoritative over "
+                     "generic counts, palettes, skins, markers or tool defaults.\n")
     if calibration:
         parts.append(f"\n## Text calibration (text_measure.py calibrate --outline)\n\n```\n{calibration.strip()[:6000]}\n```\n")
     return "".join(parts)
@@ -719,9 +733,16 @@ def page_task(project: Path, page: dict, anchor: dict | None, note: str = "") ->
     else:
         chrome = (f"CHROME SOURCE: `{project_rel}/svg_output/{anchor['stem']}.svg` - read it first and reproduce its header, title zone and footer "
                   "exactly; change only the eyebrow, the title, the source line and the folio.")
+    contract, unavailable = prepare_contract(project, page)
+    workspace = f"{project_rel}/analysis/authoring/{page['stem']}"
+    creation = (f"AUTHORING WORKSPACE: `{workspace}`. "
+                + (f"MEASURED CREATOR CONTRACT: `{contract.relative_to(ROOT).as_posix()}`; "
+                   f"pass --contract with this exact path and --workspace `{project_rel}`. "
+                   "It projects the selected template body and locked floors; read it before making a request."
+                   if contract else unavailable))
     return (f"PAGE JOB\n\nProject: `{project_rel}`\nYour page: Slide {page['number']:02d} - {page['name']}\n"
             f"Your file: `{project_rel}/svg_output/{page['stem']}.svg` (this exact name; `<stem>` is `{page['stem']}`)\n{chrome}\n{note}\n"
-            f"SLIDE RECORD\n\n{page['record']}\n")
+            f"{creation}\n\nSLIDE RECORD\n\n{page['record']}\n")
 
 
 def tier_of_state(state: dict, authors: dict) -> str:
@@ -1299,7 +1320,7 @@ class Runner:
         project_rel = self.project.relative_to(ROOT).as_posix()
         exemplar = self.args.exemplar or "projects/pga-sentinel-par4_20260920"
         parts = [PAGE_AUTHOR_BRIEF.split("## What you may touch")[0].replace("# Page author", "# Planner's view of what the page authors are told"), "# Documents\n"]
-        for rel in ("references/plan-core.md", "references/diagram-clarity.md", "references/consulting-typesetting.md", "references/consulting-review.md"):
+        for rel in ("references/plan-core.md", "references/diagram-clarity.md", "references/diagram-planning.md", "references/consulting-typesetting.md", "references/consulting-review.md"):
             parts.append(f"\n<document path=\"skills/ppt-master/{rel}\">\n{(SKILL / rel).read_text(encoding='utf-8')}\n</document>\n")
         calibration = PLANNER_EXAMPLES / "story_calibration.md"
         parts.append(f"\n# Few-shot planning examples (structure and granularity only)\n\n{calibration.read_text(encoding='utf-8')}\n")
