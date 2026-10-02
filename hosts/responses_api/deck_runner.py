@@ -867,6 +867,15 @@ class Runner:
         except (OSError, ValueError):
             return {}
 
+    def stage_pending(self, session: str) -> bool:
+        """A CLI stage stopped at its call ceiling, with the same conversation retained."""
+        try:
+            state = json.loads((self.sessions / session / "state.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        return bool(state.get("cli_session_id") and state.get("pending_input")
+                    and (state.get("last_run") or {}).get("at_ceiling"))
+
     # --- plumbing ---------------------------------------------------------------------------------
     def script(self, name: str, *script_args: str, check: bool = False) -> subprocess.CompletedProcess:
         return subprocess.run([sys.executable, str(SCRIPTS / name), *script_args], cwd=str(ROOT), capture_output=True, text=True,
@@ -1293,9 +1302,15 @@ class Runner:
             self.authors[tier] = {**saved, "effort": effort}
         started = time.time()
         self.say(f"{name}: {self.authors[tier]['model']} @ {self.authors[tier].get('effort')} started")
-        code = self.host(session, tier, ["--task-file", str(task_file)], stage=name)
-        if effort:
-            self.authors[tier] = saved
+        extra = ["--resume-pending"] if self.stage_pending(session) else ["--task-file", str(task_file)]
+        try:
+            code = self.host(session, tier, extra, stage=name)
+            while code == 0 and self.stage_pending(session):
+                self.say(f"{name}: call ceiling reached; continuing the saved conversation")
+                code = self.host(session, tier, ["--resume-pending"], stage=name)
+        finally:
+            if effort:
+                self.authors[tier] = saved
         self.say(f"{name}: finished in {time.time() - started:.0f}s (exit {code})")
         return code
 

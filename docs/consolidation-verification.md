@@ -55,3 +55,13 @@ portable creators and native editability, receipt guards, timeline padding and
 chart bounds, note-card capacity, source/export soft-break retention, reference
 companions, authoring contracts, host transport and per-request subscription cost.
 No test result alone is a claim that a full production deck passed.
+
+## Interrupted planning-stage recovery
+
+The Alder full job exposed a CLI tool-call ceiling before the planner wrote its
+required spec and lock. Its saved conversation and usage were preserved. The
+runner now resumes pending planning-side conversations instead of starting a new
+task or accepting the ceiling as completion. `tests.test_runner_stage_resume`
+passed four stdlib cases: recovery of an existing conversation, continuation of
+a newly capped stage, failure propagation, and normal nonpending task startup.
+The live recovered job remains separate completion evidence.

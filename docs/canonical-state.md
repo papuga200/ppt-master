@@ -34,3 +34,10 @@ Initialize/import source files with `project_manager.py` first. Planning and des
 Integration verification and the two full business-deck runs are recorded separately. Earlier experiments are historical evidence, including failures and rejected over-dense drafts; they do not establish consistent quality or a fifteen-minute target. A passing geometry receipt does not establish semantic fidelity, attractive composition, complete connector attachment or PowerPoint visual parity. Native fallback exports are reported as a loss of that native capability. Provider tokens price a standard API-equivalent estimate; actual subscription usage has no per-call API invoice. Service-tier surcharges are not inferred. Unknown prices remain unknown.
 
 The experimental namespace is retained for compatibility. It identifies measured helper implementation lineage, not an alternative pipeline that bypasses the canonical SVG source, roster, checker or export gates. Production gains must be exercised by the full runner rather than by copying helper files alone.
+
+Planning-side CLI conversations that stop at their tool-call ceiling are retained
+as pending. The runner resumes that same conversation before accepting the stage's
+handoff, including after a runner restart. Each continuation retains cumulative
+usage and adds its own telemetry event. Failed invocations stop rather than being
+treated as successful continuations. This recovery does not enlarge page-author
+repair budgets or add a model wall-clock deadline.
