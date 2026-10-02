@@ -51,3 +51,14 @@ connector tests and four existing connector/text-host tests passed. A retained
 ink movement above two pixels. This is a narrow export correction, not proof
 that every diagram connector is fully attached; table endpoints, unsupported
 ports and complex return routes still require inspection.
+
+Native bulleted paragraphs whose authors drew wrapped continuation lines as
+separate SVG texts now retain those lines in their original native paragraph.
+Hanging indentation, mixed emphasis and explicit breaks/custom tabs preserve
+the authored positions; neighbouring items then share one editable list frame.
+The correction excludes other columns, new headings, markers and painted row
+separators. Eight focused tests passed. In the retained twelve-slide actual
+PowerPoint comparison, the two affected lists became complete native lists
+with no ink movement above two pixels; nine chart/data package parts were
+unchanged. The retained Meridian package matched the earlier exporter in all
+fifty parts. This does not certify every list or arbitrary text grouping.

@@ -429,6 +429,7 @@ def has_marker(box, items: list) -> bool:
 
 def join_lines(texts: list, items: list, stats: dict) -> list:
     """Lines of one paragraph that the author drew as separate one-line texts become one paragraph in one box."""
+    texts = join_bullet_continuations(texts, items, stats)
     order = sorted(texts, key=lambda b: (round(b.left / (2 * PX)), b.top))
     gone: set = set()
 
@@ -483,6 +484,95 @@ def join_lines(texts: list, items: list, stats: dict) -> list:
         para.prepare_breaks(first.fonts)
         ext = first.item.el.find("p:spPr/a:xfrm/a:ext", NS)
         ext.set("cy", str(int(round(para.height))))
+        stats["joined"] += len(group)
+        stats["paragraphs"] += 1
+    return [b for b in texts if id(b) not in gone]
+
+
+def join_bullet_continuations(texts: list, items: list, stats: dict) -> list:
+    """Join native bullet continuations only at the bullet's hanging text edge.
+
+    A custom tab after the retained break preserves a small authored inset beyond
+    marL. The break stays explicit because wrapping alone cannot express that
+    per-line inset. A following bullet or heading always remains a paragraph.
+    """
+    order = sorted(texts, key=lambda b: b.top)
+    gone: set = set()
+    for first in order:
+        if id(first) in gone or first.item.turned or first.item.scaled or first.align != "l" or len(first.paras) != 1:
+            continue
+        para = first.paras[0]
+        ppr = para.el.find("a:pPr", NS)
+        if para.lines != 1 or ppr is None or not any(ppr.find(f"a:{kind}", NS) is not None for kind in ("buChar", "buAutoNum")):
+            continue
+        margin = int(ppr.get("marL") or 0)
+        if margin <= 0 or para.signature() is None or ppr.find("a:tabLst", NS) is not None:
+            continue
+        group, pitch, continuation_left = [first], None, None
+        for other in order:
+            last = group[-1]
+            if id(other) in gone or other.top <= last.top:
+                continue
+            inset = other.left - first.left
+            if not margin - 0.5 * PX <= inset <= margin + 4 * PX:
+                continue
+            step = other.top - last.top
+            if step > 1.75 * para.size:
+                break
+            if (other.item.turned or other.item.scaled or other.align != "l" or len(other.paras) != 1
+                    or other.paras[0].lines != 1 or other.paras[0].signature() is None
+                    or other.paras[0].signature()[::3] != para.signature()[::3]
+                    or step < 0.9 * para.size or (pitch is not None and abs(step - pitch) > 0.75 * PX)):
+                break
+            props = other.paras[0].el.find("a:pPr", NS)
+            if ((props is not None and any(props.find(f"a:{kind}", NS) is not None for kind in ("buChar", "buAutoNum", "buBlip")))
+                    or LIST_MARK.match(other.paras[0].text()) or has_marker(other, items)
+                    or (continuation_left is not None and abs(inset - continuation_left) > 0.5 * PX)
+                    or not gap_is_clear(last, other, items)):
+                break
+            if any(b is not other and b is not first and id(b) not in gone and b.left <= first.left + 1.5 * PX
+                   and b.right > other.left and last.top < b.top <= other.top for b in order):
+                break  # a new list item at the marker edge interrupts this paragraph
+            pitch = step if pitch is None else pitch
+            continuation_left = inset
+            group.append(other)
+        if len(group) < 2:
+            continue
+        use_tab = continuation_left > margin + 0.5 * PX
+        if use_tab:
+            tabs = etree.Element(q("a:tabLst"))
+            etree.SubElement(tabs, q("a:tab"), pos=str(int(round(continuation_left))), algn="l")
+            later = ppr.find("a:defRPr", NS)
+            ppr.insert(ppr.index(later) if later is not None else len(ppr), tabs)
+        for other in group[1:]:
+            etree.SubElement(para.el, q("a:br"))
+            if use_tab:
+                tab_run = etree.SubElement(para.el, q("a:r"))
+                props = other.paras[0].el.find("a:r/a:rPr", NS)
+                if props is not None:
+                    tab_run.append(etree.fromstring(etree.tostring(props)))
+                etree.SubElement(tab_run, q("a:t")).text = "\t"
+            for node in list(other.paras[0].el):
+                if etree.QName(node).localname in ("r", "fld"):
+                    para.el.append(node)
+            other.item.parent.remove(other.item.el)
+            gone.add(id(other))
+        for old in ppr.findall("a:lnSpc", NS):
+            ppr.remove(old)
+        spacing = etree.Element(q("a:lnSpc"))
+        points = max(1, int(pitch / 12700 + 0.5))
+        etree.SubElement(spacing, q("a:spcPts")).set("val", str(points * 100))
+        ppr.insert(0, spacing)
+        para.pitch, para.lines = float(points * 12700), len(group)
+        para.height = para.pitch * para.lines
+        first.move_top(first.top + para.size - 0.8 * para.pitch)
+        first.right = max(b.right for b in group)
+        first.width = first.right - first.left
+        first.set_width(first.width)
+        first.bottom = first.top + para.height
+        first.item.el.find("p:spPr/a:xfrm/a:ext", NS).set("cy", str(int(round(para.height))))
+        # Retain authored breaks and tab positions, including when fonts exist.
+        para.joins, para.real_width = [], None
         stats["joined"] += len(group)
         stats["paragraphs"] += 1
     return [b for b in texts if id(b) not in gone]
