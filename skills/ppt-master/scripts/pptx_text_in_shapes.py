@@ -806,7 +806,8 @@ def rules_to_lines(tree, stats: dict) -> None:
 
 def glue_connectors(tree, stats: dict) -> None:
     """A straight line that runs from the edge of one box to the edge of another becomes a real connector glued to both: move a box and
-    the arrow follows. Geometry and paint are kept, so nothing moves now. Only rectangles offer the four edge sites this relies on; a line
+    the arrow follows. Geometry and paint are kept, so nothing moves now. Rectangles offer four edge sites; decision diamonds offer their
+    four vertex sites (never a bounding-box corner or an arbitrary point on a sloping edge). A line
     with a free end is glued at the end that touches. A freeform of one straight segment, or of two or three horizontal and vertical
     segments (an L or a Z: what `M x y H .. V .. H ..` exports as), becomes a straight, bentConnector2 or bentConnector3 connector through
     the same corners (elbow_connector). Routes of four or more segments, and U-shaped returns whose two ends sit level, stay drawings:
@@ -818,12 +819,12 @@ def glue_connectors(tree, stats: dict) -> None:
             continue
         preset = item.el.find("p:spPr/a:prstGeom", NS)
         width, height = item.box[2] - item.box[0], item.box[3] - item.box[1]
-        if preset is None or preset.get("prst") not in ("rect", "roundRect") or width < 16 * PX or height < 10 * PX:
+        if preset is None or preset.get("prst") not in ("rect", "roundRect", "diamond", "flowChartDecision") or width < 16 * PX or height < 10 * PX:
             continue
         boxes.append(item)
 
     def site(point):
-        """(shape id, site index) of the smallest box whose edge this point lies on: 0 top, 1 left, 2 bottom, 3 right."""
+        """Smallest eligible shape at this endpoint: 0 top, 1 left, 2 bottom, 3 right; diamonds require a real vertex."""
         x, y = point
         best = None
         for box in boxes:
@@ -831,7 +832,13 @@ def glue_connectors(tree, stats: dict) -> None:
             reach = 4 * PX
             if not (left - reach <= x <= right + reach and top - reach <= y <= bottom + reach):
                 continue
-            distances = [(abs(y - top), 0), (abs(x - left), 1), (abs(y - bottom), 2), (abs(x - right), 3)]
+            preset = box.el.find("p:spPr/a:prstGeom", NS).get("prst")
+            if preset in ("diamond", "flowChartDecision"):
+                cx, cy = (left + right) / 2, (top + bottom) / 2
+                distances = [(((x - px) ** 2 + (y - py) ** 2) ** 0.5, index)
+                             for px, py, index in ((cx, top, 0), (left, cy, 1), (cx, bottom, 2), (right, cy, 3))]
+            else:
+                distances = [(abs(y - top), 0), (abs(x - left), 1), (abs(y - bottom), 2), (abs(x - right), 3)]
             distance, index = min(distances)
             if distance > reach:
                 continue  # inside the box, not on its edge

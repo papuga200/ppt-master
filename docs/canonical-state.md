@@ -41,3 +41,13 @@ handoff, including after a runner restart. Each continuation retains cumulative
 usage and adds its own telemetry event. Failed invocations stop rather than being
 treated as successful continuations. This recovery does not enlarge page-author
 repair budgets or add a model wall-clock deadline.
+
+The text-in-shapes export pass also attaches native connectors to the four real
+vertices of `diamond` and `flowChartDecision` shapes. Bounding-box corners and
+arbitrary points on sloping edges are deliberately excluded: attaching those to
+a different native site would change the authored route. Six focused decision
+connector tests and four existing connector/text-host tests passed. A retained
+16-slide PowerPoint comparison gained three fully attached connectors with no
+ink movement above two pixels. This is a narrow export correction, not proof
+that every diagram connector is fully attached; table endpoints, unsupported
+ports and complex return routes still require inspection.
