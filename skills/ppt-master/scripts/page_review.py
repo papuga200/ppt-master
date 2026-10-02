@@ -18,8 +18,9 @@ prints an ``IMAGE: <path>`` line. A host that shows images to its model attaches
 path to the tool result; a host that cannot must open the path with its own image tool.
 
 ``review`` is the independent reviewer: one fresh model call with no history that receives
-only the current render, the page's slide record from ``design_spec.md`` §IX, the reference
-slides delivered for the page, and the review language. It must inventory every overlap,
+only the current render, the page's slide record from ``design_spec.md`` §IX, the deck's
+reading/canvas/type context, the reference slides delivered for the page, and the review
+language. It must inventory every overlap,
 clip, crossing and leftover before it judges the concept, and ends with ``VERDICT: PASS |
 EXECUTION_REPAIR | CONCEPT_REPLAN``. The author that drew the page does not see it well
 (FORK_RUN_LOG.md, cq-brief1); a call that did not draw it does. The verdict is recorded in
@@ -324,7 +325,9 @@ def cmd_restore(args: argparse.Namespace) -> int:
     return 0
 
 
-REVIEW_INSTRUCTIONS = """You are an independent visual reviewer of one rendered slide. You did not draw it and you have no stake in it. You receive the slide record it was drawn from, the review language of this profile, any reference slide the author was shown (a reference lends structure and devices, never content), the rendered image, and the result of a geometry lint that measured the page in the browser.
+REVIEW_INSTRUCTIONS = """You are an independent visual reviewer of one rendered slide. You did not draw it and you have no stake in it. You receive the slide record it was drawn from, the deck's declared reading/canvas/type context, the review language of this profile, any reference slide the author was shown (a reference lends structure and devices, never content), the rendered image, and the result of a geometry lint that measured the page in the browser.
+
+Use the declared reading mode and typography roles when judging reading size. Meeting a declared floor does not excuse visible crowding, low contrast or illegibility; the rendered image remains the evidence. If no context is supplied, do not invent a reading mode or a deck-specific type floor.
 
 Work in this order:
 1. DEFECTS.
@@ -463,6 +466,33 @@ def _slide_record(project: Path, stem: str) -> str:
     return match.group(1).strip() if match else ""
 
 
+def _deck_review_context(project: Path) -> str:
+    """Retain declared reading, canvas and type constraints without loading the whole plan."""
+    import re
+    spec = project / "design_spec.md"
+    if not spec.is_file():
+        return ""
+    text = spec.read_text(encoding="utf-8")
+    sections = re.split(r"(?=^## [IVX]+\. )", text, flags=re.M)
+    context = []
+    for section in sections:
+        if section.startswith("## I. Project Information"):
+            fields = []
+            for line in section.splitlines():
+                cells = line.strip().split("|")
+                if len(cells) >= 4 and cells[1].strip() in {
+                    "Target Audience", "Communication Intent", "Delivery Context",
+                    "Artifact Afterlife", "Reading Mode",
+                }:
+                    fields.append(line)
+            if fields:
+                context.append("## Declared reader context\n\n| Item | Value |\n| --- | --- |\n"
+                               + "\n".join(fields))
+        elif section.startswith(("## II. Canvas Specification", "## IV. Typography System")):
+            context.append(section.strip())
+    return "\n\n".join(context)
+
+
 def _diagram_contract() -> str:
     """The Diagram contract section of diagram-clarity.md: what a reviewer holds every diagram to (authors get the whole file)."""
     import re
@@ -522,6 +552,10 @@ def cmd_review(args: argparse.Namespace) -> int:
     record = _slide_record(project, stem) or "(no slide record found in design_spec.md §IX for this page)"
     language = SCRIPTS.parent / "references" / "consulting-review.md"
     content = [{"type": "input_text", "text": "SLIDE RECORD (design_spec.md §IX):\n\n" + record}]
+    deck_context = _deck_review_context(project)
+    if deck_context:
+        content.append({"type": "input_text", "text": "DECLARED DECK CONTEXT (design_spec.md):\n\n"
+                        + deck_context})
     if language.is_file():
         content.append({"type": "input_text", "text": "REVIEW LANGUAGE (consulting-review.md):\n\n" + language.read_text(encoding="utf-8")})
     contract = _diagram_contract()
