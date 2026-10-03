@@ -14,5 +14,8 @@ Notes:
 - Solution, planner and template stages always use the `frontier` author; the planner's effort is `--planner-effort` (default high).
 - Profile A reviews Opus pages with Opus. The runner's default keeps the reviewer in another model family than the author; mixing
   (`--authors authors_opus.json --reviewers reviewers_codex.json`, or the reverse) restores that and still uses subscriptions only.
-- `--max-turns` is Claude's own turn limit; for Codex it is a ceiling on tool calls enforced by a watchdog. Subscription windows are
-  shared across parallel sessions, so a lower `--max-parallel` than the HTTP default (16) is prudent until safe concurrency is measured.
+- `--max-parallel 0` (the default) starts every ready page, and every independent repair within a round, at once.
+  Templates and planning finish first; without templates, the chrome anchor still precedes its dependent pages.
+  Review-dependent repair rounds remain sequential. A positive `--max-parallel N` explicitly limits concurrency.
+  Subscription allowance and provider capacity are shared; starting all jobs does not guarantee unchanged per-call latency.
+- `--max-turns` is Claude's own turn limit; for Codex it is a ceiling on tool calls enforced by a watchdog.

@@ -2,7 +2,7 @@
 """Author a planned deck page by page, in parallel, each page in its own small conversation.
 
     python hosts/responses_api/deck_runner.py projects/<project> --session NAME
-        [--authors authors.json] [--max-parallel 16] [--pages 03 05] [--max-turns 60]
+        [--authors authors.json] [--max-parallel 0] [--pages 03 05] [--max-turns 60]
         [--no-anchor] [--no-escalate] [--skip-export]
 
 Why. One conversation for a whole deck re-reads everything it has ever seen on every call: on a
@@ -994,7 +994,13 @@ class Runner:
         return session
 
     def fan_out(self, jobs: list) -> None:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, self.args.max_parallel)) as pool:
+        if not jobs:
+            return
+        limit = self.args.max_parallel
+        if limit < 0:
+            raise ValueError("max_parallel must be 0 (all ready jobs) or a positive limit")
+        workers = min(limit, len(jobs)) if limit else len(jobs)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
             for future in concurrent.futures.as_completed([pool.submit(job) for job in jobs]):
                 future.result()
 
@@ -2060,6 +2066,14 @@ class Runner:
         return 0
 
 
+def parallel_limit(value: str) -> int:
+    """Parse an optional concurrency cap; zero starts every ready job."""
+    limit = int(value)
+    if limit < 0:
+        raise argparse.ArgumentTypeError("use 0 for all ready jobs, or a positive limit")
+    return limit
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("project", help="project directory with design_spec.md and spec_lock.md")
@@ -2068,7 +2082,8 @@ def main() -> int:
                                           "that tier on the subscription CLI (see route_profiles/)")
     parser.add_argument("--reviewers", help="JSON mapping tier -> {model, effort, api_base, key_var, provider} for the independent reviewer; merged over the defaults")
     parser.add_argument("--premium", action="store_true", help="frontier pages by Claude Opus 5.5 @ medium instead of Sol: best-looking hard pages, about 3.5x the cost, no faster")
-    parser.add_argument("--max-parallel", type=int, default=16, help="pages authored at once (16 since 23 Sep 2026: a 10-12 page deck no longer queues pages behind the first 8)")
+    parser.add_argument("--max-parallel", type=parallel_limit, default=0,
+                        help="concurrent page/repair jobs: 0 starts all ready jobs (default); a positive number opts into a cap")
     parser.add_argument("--max-turns", type=int, default=60, help="model-call ceiling per page session")
     parser.add_argument("--pages", nargs="*", help="only these page numbers (the anchor is still authored first when absent from disk)")
     parser.add_argument("--no-anchor", action="store_true", help="no chrome anchor: every page starts at once")

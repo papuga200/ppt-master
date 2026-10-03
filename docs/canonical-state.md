@@ -10,10 +10,17 @@ Maintained 2026-10-03. This fork integrates the experimental measured SVG creato
 
 ```powershell
 $env:PPT_MASTER_REFERENCE_LIBRARY = '<absolute external reference-library folder>'
-python hosts/responses_api/deck_runner.py projects/<project> --session <name> --authors hosts/responses_api/route_profiles/sol61_xhigh_subscription.json --reviewers hosts/responses_api/route_profiles/sol61_xhigh_subscription.json --planner-effort xhigh --max-parallel 4
+python hosts/responses_api/deck_runner.py projects/<project> --session <name> --authors hosts/responses_api/route_profiles/sol61_xhigh_subscription.json --reviewers hosts/responses_api/route_profiles/sol61_xhigh_subscription.json --planner-effort xhigh --max-parallel 0
 ```
 
 Initialize/import source files with `project_manager.py` first. Planning and design confirmations are delegated only when the user explicitly delegates those choices. Original optional creator craft packs can be supplied beneath project resources with an `analysis/creation-resources/catalog.md`; the approved facts, style and native export rules take precedence. The external reference library can pair images with faithful source SVGs/maps, plan and annotations; `reference_library.py companion` returns complete companion text through the host.
+
+All ready page jobs start together by default, as do independent repairs within a round.
+An explicit positive `--max-parallel N` opts into a cap. Shared planning and template work
+precedes authoring; a missing-template chrome anchor still precedes its dependent pages.
+Reviews and subsequent repair rounds remain dependent on their preceding outputs.
+The retained Meridian/Alder jobs explicitly used a cap of four; their telemetry is historical
+and does not demonstrate the speed or provider capacity of this new scheduling default.
 
 ## Gain retention
 
